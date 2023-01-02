@@ -28,6 +28,8 @@ module Spaceballs
 
     -- ** Response
     respond,
+    FileResponse (..),
+    respondFile,
   )
 where
 
@@ -224,3 +226,14 @@ respond response = do
   liftIO do
     sent <- resp response
     throwIO (Done sent)
+
+data FileResponse = FileResponse
+  { status :: !Http.Status,
+    headers :: ![Http.Header],
+    file :: !FilePath
+  }
+
+-- | Respond to the client with a file.
+respondFile :: MonadHandler m => FileResponse -> m void
+respondFile FileResponse {file, headers, status} =
+  respond (Wai.responseFile status headers file Nothing)
