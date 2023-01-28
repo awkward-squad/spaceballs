@@ -175,8 +175,7 @@ data Request = Request
     id :: Text,
     method :: Http.Method,
     params :: [(Text, Maybe Text)],
-    path :: [Text],
-    query :: [(Text, Maybe Text)]
+    path :: [Text]
   }
 
 makeRequest :: Wai.Request -> IO Request
@@ -191,8 +190,7 @@ makeRequest request = do
         id,
         method = Wai.requestMethod request,
         params = map (\(k, v) -> (Text.decodeUtf8 k, Text.decodeUtf8 <$> v)) (Wai.queryString request),
-        path = Wai.pathInfo request,
-        query = map (\(k, v) -> (Text.decodeUtf8 k, Text.decodeUtf8 <$> v)) (Wai.queryString request)
+        path = Wai.pathInfo request
       }
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -209,7 +207,7 @@ ptext =
 param :: MonadHandler m => Text -> Param a -> m (Maybe a)
 param name (Param parser) = do
   request <- askRequest
-  case List.lookup name request.query of
+  case List.lookup name request.params of
     Nothing -> pure Nothing
     Just value ->
       case value >>= parser of
