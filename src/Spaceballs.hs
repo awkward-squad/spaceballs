@@ -84,7 +84,7 @@ instance Show Done where
 ------------------------------------------------------------------------------------------------------------------------
 -- Router monad
 
--- | The router: statefully parse a request path one path segment at a time.
+-- | The router monad.
 newtype Router a = Router ([Text] -> Maybe (a, [Text]))
   deriving (Alternative, Applicative, Functor, Monad) via StateT [Text] Maybe
 
@@ -170,12 +170,12 @@ type Respond =
 -- Request
 
 data Request = Request
-  { body :: ByteString,
-    headers :: [(CaseInsensitive.CI Text, Text)],
-    id :: Text,
-    method :: Http.Method,
-    params :: [(Text, Maybe Text)],
-    path :: [Text]
+  { body :: !ByteString,
+    headers :: ![(CaseInsensitive.CI Text, Text)],
+    id :: !Text,
+    method :: !Http.Method,
+    params :: ![(Text, Maybe Text)],
+    path :: ![Text]
   }
 
 makeRequest :: Wai.Request -> IO Request
