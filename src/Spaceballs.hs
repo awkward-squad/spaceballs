@@ -42,7 +42,9 @@ import Control.Exception
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Trans.State.Strict (StateT (..))
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64.URL qualified as Base64.Url
+import Data.ByteString.Lazy (LazyByteString)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.CaseInsensitive qualified as CaseInsensitive
 import Data.Coerce (coerce)
@@ -58,6 +60,7 @@ import Data.Text.Encoding qualified as Text
 import Data.Void (Void, absurd)
 import GHC.Generics (Generic)
 import Network.HTTP.Types qualified as Http
+import Network.HTTP.Types.Status qualified as Http
 import Network.Wai qualified as Wai
 import System.Random.Stateful qualified as Random
 import Unsafe.Coerce (unsafeCoerce)
@@ -360,18 +363,15 @@ params name (Param parser) = do
 
 respondBadParameter :: MonadHandler m => m void
 respondBadParameter =
-  respond (Wai.responseBuilder Http.status400 [] mempty)
+  respondWith (Wai.responseBuilder Http.status400 [] mempty)
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Response
 
 -- | Respond to the client.
-respond :: MonadHandler m => Wai.Response -> m void
-respond response = do
-  resp <- askRespond
-  liftIO do
-    sent <- resp response
-    throwIO (Done sent)
+respond :: MonadHandler m => Int -> [Http.Header] -> LazyByteString -> m void
+respond status headers body =
+  respondWith (Wai.responseLBS (intToStatus status) headers body)
 
 data FileResponse = FileResponse
   { status :: !Http.Status,
@@ -382,4 +382,63 @@ data FileResponse = FileResponse
 -- | Respond to the client with a file.
 respondFile :: MonadHandler m => FileResponse -> m void
 respondFile FileResponse {file, headers, status} =
-  respond (Wai.responseFile status headers file Nothing)
+  respondWith (Wai.responseFile status headers file Nothing)
+
+respondWith :: MonadHandler m => Wai.Response -> m void
+respondWith response = do
+  resp <- askRespond
+  liftIO do
+    sent <- resp response
+    throwIO (Done sent)
+
+intToStatus :: Int -> Http.Status
+intToStatus = \case
+  100 -> Http.status100
+  101 -> Http.status101
+  200 -> Http.status200
+  201 -> Http.status201
+  202 -> Http.status202
+  203 -> Http.status203
+  204 -> Http.status204
+  205 -> Http.status205
+  206 -> Http.status206
+  300 -> Http.status300
+  301 -> Http.status301
+  302 -> Http.status302
+  303 -> Http.status303
+  304 -> Http.status304
+  305 -> Http.status305
+  307 -> Http.status307
+  308 -> Http.status308
+  400 -> Http.status400
+  401 -> Http.status401
+  402 -> Http.status402
+  403 -> Http.status403
+  404 -> Http.status404
+  405 -> Http.status405
+  406 -> Http.status406
+  407 -> Http.status407
+  408 -> Http.status408
+  409 -> Http.status409
+  410 -> Http.status410
+  411 -> Http.status411
+  412 -> Http.status412
+  413 -> Http.status413
+  414 -> Http.status414
+  415 -> Http.status415
+  416 -> Http.status416
+  417 -> Http.status417
+  418 -> Http.status418
+  422 -> Http.status422
+  426 -> Http.status426
+  428 -> Http.status428
+  429 -> Http.status429
+  431 -> Http.status431
+  500 -> Http.status500
+  501 -> Http.status501
+  502 -> Http.status502
+  503 -> Http.status503
+  504 -> Http.status504
+  505 -> Http.status505
+  511 -> Http.status511
+  status -> Http.Status status ByteString.empty
