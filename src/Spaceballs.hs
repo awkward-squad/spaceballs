@@ -2,18 +2,19 @@ module Spaceballs
   ( -- * Application
     application,
 
-    -- * Router monad
+    -- * Router
     Router,
-    text,
-    theText,
 
-    -- ** Resource
-    Resource,
+    -- ** Resources
     delete,
     get,
     patch,
     post,
     put,
+
+    -- ** Children
+    capture,
+    segment,
 
     -- * Handler monad
     MonadHandler (..),
@@ -38,9 +39,8 @@ module Spaceballs
 where
 
 import Control.Applicative (Alternative (..))
-import Control.Exception
+import Control.Exception (Exception, throwIO, try)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Control.Monad.Trans.State.Strict (StateT (..))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64.URL qualified as Base64.Url
@@ -52,6 +52,7 @@ import Data.Kind (Type)
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Primitive.Array (Array)
 import Data.Primitive.Array qualified as Array
 import Data.Text (Text)
@@ -71,22 +72,23 @@ import Prelude hiding (id)
 
 -- | Make a WAI application.
 application ::
-  MonadHandler m =>
+  (MonadHandler m) =>
   (forall a. m a -> IO a) ->
-  Router (Resource m) ->
+  [Router m] ->
   IO Wai.ResponseReceived
-application runHandler router = do
+application runHandler routers = do
+  let router = concatRouters routers
   request <- runHandler askRequest
   resp <- runHandler askRespond
-  case runRouter request.path (router <* end) of
-    Just (f, []) ->
-      case runResource f request.method of
-        Nothing -> resp (Wai.responseBuilder Http.status405 [] mempty)
-        Just action ->
-          try (runHandler action) >>= \case
-            Left (Done sent) -> pure sent
-            Right v -> absurd v
-    _ -> resp (Wai.responseBuilder Http.status400 [] mempty)
+  let handlers = routerHandlersAtPath router request.path
+  if isEmptyHandlers handlers
+    then resp (Wai.responseBuilder Http.status404 [] mempty)
+    else case findHandler handlers request.method of
+      NoHandler -> resp (Wai.responseBuilder Http.status405 [] mempty)
+      Handler handler ->
+        try (runHandler handler) >>= \case
+          Left (Done sent) -> pure sent
+          Right v -> absurd v
 
 -- Internal exception type that indicates we've responded to the client.
 -- TODO make this an async exception so it's less likely to be caught and ignored
@@ -98,120 +100,185 @@ instance Show Done where
   show (Done _) = "Done"
 
 ------------------------------------------------------------------------------------------------------------------------
--- Router monad
+-- Router
 
--- | The router monad.
-newtype Router a = Router ([Text] -> Maybe (a, [Text]))
-  deriving (Alternative, Applicative, Functor, Monad) via StateT [Text] Maybe
-
-runRouter :: [Text] -> Router a -> Maybe (a, [Text])
-runRouter x (Router f) =
-  f x
-
--- | Assert that current path segment is equal to the given text, and advance to the next path segment.
-theText :: Text -> Router ()
-theText s =
-  Router \case
-    t : ts | s == t -> Just ((), ts)
-    _ -> Nothing
-
--- | Get the current path segment, and advance to the next path segment.
-text :: Router Text
-text =
-  Router \case
-    [] -> Nothing
-    s : ss -> Just (s, ss)
-
-end :: Router ()
-end =
-  Router \case
-    [] -> Just ((), [])
-    _ -> Nothing
-
-------------------------------------------------------------------------------------------------------------------------
--- Resource
-
--- | A resource.
-data Resource m = Resource
-  { resourceDelete :: !(Maybe (m Void)),
-    resourceGet :: !(Maybe (m Void)),
-    resourcePatch :: !(Maybe (m Void)),
-    resourcePost :: !(Maybe (m Void)),
-    resourcePut :: !(Maybe (m Void))
+data Router m = Router
+  { handlers :: !(Handlers m),
+    children :: !(Mapping Text (Router m))
   }
 
-instance Semigroup (Resource m) where
-  Resource a1 b1 c1 d1 e1 <> Resource a2 b2 c2 d2 e2 =
-    Resource (a1 <|> a2) (b1 <|> b2) (c1 <|> c2) (d1 <|> d2) (e1 <|> e2)
+-- A lot of ugly code here just to get a `Router` that doesn't have a user-visible `Semigroup` instance... heh.
+-- There's no harm in the instance, it just seems cleaner to give the user only one way to do things (namely, to
+-- define each router as an element in a list, and not be able to <> them together).
+newtype RouterWithSemigroup m
+  = RouterWithSemigroup (Router m)
 
-runResource :: Resource m -> Http.Method -> Maybe (m Void)
-runResource Resource {resourceDelete, resourceGet, resourcePatch, resourcePost, resourcePut} method
-  | method == Http.methodGet = resourceGet
-  | method == Http.methodPost = resourcePost
-  | method == Http.methodPut = resourcePut
-  | method == Http.methodDelete = resourceDelete
-  | method == Http.methodPatch = resourcePatch
-  | otherwise = Nothing
+instance Semigroup (RouterWithSemigroup m) where
+  RouterWithSemigroup x <> RouterWithSemigroup y = RouterWithSemigroup (appendRouters x y)
+
+emptyRouter :: Router m
+emptyRouter =
+  Router emptyHandlers EmptyMapping
+
+appendRouters :: forall m. Router m -> Router m -> Router m
+appendRouters x y =
+  Router
+    (x.handlers <> y.handlers)
+    ( coerce
+        @(Mapping Text (RouterWithSemigroup m))
+        @(Mapping Text (Router m))
+        ( coerce @(Mapping Text (Router m)) @(Mapping Text (RouterWithSemigroup m)) x.children
+            <> coerce @(Mapping Text (Router m)) @(Mapping Text (RouterWithSemigroup m)) y.children
+        )
+    )
+
+concatRouters :: forall m. [Router m] -> Router m
+concatRouters =
+  coerce
+    @([RouterWithSemigroup m] -> RouterWithSemigroup m)
+    @([Router m] -> Router m)
+    concatRoutersWithSemigroup
+
+concatRoutersWithSemigroup :: forall m. [RouterWithSemigroup m] -> RouterWithSemigroup m
+concatRoutersWithSemigroup = \case
+  [] -> RouterWithSemigroup emptyRouter
+  x : xs ->
+    x <> foldr (<>) (RouterWithSemigroup emptyRouter) xs
+
+routerHandlersAtPath :: Router m -> [Text] -> Handlers m
+routerHandlersAtPath router = \case
+  [] -> router.handlers
+  x : xs ->
+    case runMapping router.children x of
+      Nothing -> emptyHandlers
+      Just router1 -> routerHandlersAtPath router1 xs
 
 -- | @DELETE@ a resource.
-delete :: m Void -> Resource m
+delete :: m Void -> Router m
 delete handler =
-  Resource
-    { resourceDelete = Just handler,
-      resourceGet = Nothing,
-      resourcePatch = Nothing,
-      resourcePost = Nothing,
-      resourcePut = Nothing
+  emptyRouter
+    { handlers = emptyHandlers {delete = Handler handler}
     }
 
 -- | @GET@ a resource.
-get :: m Void -> Resource m
+get :: m Void -> Router m
 get handler =
-  Resource
-    { resourceDelete = Nothing,
-      resourceGet = Just handler,
-      resourcePatch = Nothing,
-      resourcePost = Nothing,
-      resourcePut = Nothing
+  emptyRouter
+    { handlers = emptyHandlers {get = Handler handler}
     }
 
 -- | @PATCH@ a resource.
-patch :: m Void -> Resource m
+patch :: m Void -> Router m
 patch handler =
-  Resource
-    { resourceDelete = Nothing,
-      resourceGet = Nothing,
-      resourcePatch = Just handler,
-      resourcePost = Nothing,
-      resourcePut = Nothing
+  emptyRouter
+    { handlers = emptyHandlers {patch = Handler handler}
     }
 
 -- | @POST@ a resource.
-post :: m Void -> Resource m
+post :: m Void -> Router m
 post handler =
-  Resource
-    { resourceDelete = Nothing,
-      resourceGet = Nothing,
-      resourcePatch = Nothing,
-      resourcePost = Just handler,
-      resourcePut = Nothing
+  emptyRouter
+    { handlers = emptyHandlers {post = Handler handler}
     }
 
 -- | @PUT@ a resource.
-put :: m Void -> Resource m
+put :: m Void -> Router m
 put handler =
-  Resource
-    { resourceDelete = Nothing,
-      resourceGet = Nothing,
-      resourcePatch = Nothing,
-      resourcePost = Nothing,
-      resourcePut = Just handler
+  emptyRouter
+    { handlers = emptyHandlers {put = Handler handler}
     }
+
+-- | Capture a path segment.
+capture :: (Text -> [Router m]) -> Router m
+capture f =
+  emptyRouter
+    { children = TotalMapping (concatRouters . f)
+    }
+
+-- | Match a path segment.
+segment :: Text -> [Router m] -> Router m
+segment name router =
+  emptyRouter
+    { children = PartialMapping (Map.singleton name (concatRouters router))
+    }
+
+------------------------------------------------------------------------------------------------------------------------
+-- Mapping
+
+data Mapping a b
+  = EmptyMapping
+  | PartialMapping !(Map a b)
+  | TotalMapping !(a -> b)
+  | TotalMappingWithOverrides !(Map a b) !(a -> b)
+
+instance (Ord a, Semigroup b) => Semigroup (Mapping a b) where
+  EmptyMapping <> y = y
+  x <> EmptyMapping = x
+  PartialMapping x <> PartialMapping y = PartialMapping (Map.unionWith (<>) x y)
+  PartialMapping x <> TotalMapping y = TotalMappingWithOverrides x y
+  PartialMapping x <> TotalMappingWithOverrides y z = TotalMappingWithOverrides (Map.unionWith (<>) x y) z
+  x@(TotalMapping _) <> _ = x
+  TotalMappingWithOverrides x y <> TotalMappingWithOverrides z _ = TotalMappingWithOverrides (Map.unionWith (<>) x z) y
+  x@(TotalMappingWithOverrides _ _) <> _ = x
+
+runMapping :: (Ord a) => Mapping a b -> a -> Maybe b
+runMapping = \case
+  EmptyMapping -> const Nothing
+  PartialMapping m -> (`Map.lookup` m)
+  TotalMapping f -> Just . f
+  TotalMappingWithOverrides m f -> Just . \x -> fromMaybe (f x) (Map.lookup x m)
+
+------------------------------------------------------------------------------------------------------------------------
+-- Handlers
+
+-- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
+data Handlers m = Handlers
+  { delete :: !(Handler m),
+    get :: !(Handler m),
+    patch :: !(Handler m),
+    post :: !(Handler m),
+    put :: !(Handler m)
+  }
+
+-- Left-biased
+instance Semigroup (Handlers m) where
+  Handlers a1 b1 c1 d1 e1 <> Handlers a2 b2 c2 d2 e2 =
+    Handlers (a1 <> a2) (b1 <> b2) (c1 <> c2) (d1 <> d2) (e1 <> e2)
+
+emptyHandlers :: Handlers m
+emptyHandlers =
+  Handlers NoHandler NoHandler NoHandler NoHandler NoHandler
+
+isEmptyHandlers :: Handlers m -> Bool
+isEmptyHandlers = \case
+  Handlers NoHandler NoHandler NoHandler NoHandler NoHandler -> True
+  _ -> False
+
+findHandler :: Handlers m -> Http.Method -> Handler m
+findHandler handlers method
+  | method == Http.methodGet = handlers.get
+  | method == Http.methodPost = handlers.post
+  | method == Http.methodPut = handlers.put
+  | method == Http.methodDelete = handlers.delete
+  | method == Http.methodPatch = handlers.patch
+  | otherwise = NoHandler
+
+------------------------------------------------------------------------------------------------------------------------
+-- Resource handler
+
+data Handler m
+  = NoHandler
+  | Handler !(m Void)
+
+-- Left-biased
+instance Semigroup (Handler m) where
+  NoHandler <> x = x
+  x <> _ = x
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Handler monad
 
-class MonadIO m => MonadHandler m where
+class (MonadIO m) => MonadHandler m where
   askRequest :: m Request
   askRespond :: m Respond
 
@@ -257,7 +324,7 @@ data P :: (Type -> Type) -> Bool -> Type where
   SingleParam :: !Text -> P f a
   ListOfParams :: !(f (P f 'False)) -> P f 'True
 
-deriving stock instance (forall x. Eq x => Eq (f x)) => (Eq (P f a))
+deriving stock instance (forall x. (Eq x) => Eq (f x)) => (Eq (P f a))
 
 coercePs :: [P f 'False] -> [P g b]
 coercePs = unsafeCoerce
@@ -338,7 +405,7 @@ ptext =
 -- | Get an optional parameter from the request.
 --
 -- If multiple parameters with the given name exist, this function returns the first.
-param :: MonadHandler m => Text -> Param a -> m (Maybe a)
+param :: (MonadHandler m) => Text -> Param a -> m (Maybe a)
 param name (Param parser) = do
   request <- askRequest
   case lookupParam name request.params of
@@ -351,7 +418,7 @@ param name (Param parser) = do
 -- | Get an optional parameter from the request.
 --
 -- If multiple parameters with the given name exist, this function returns them all.
-params :: MonadHandler m => Text -> Param a -> m (Array a)
+params :: (MonadHandler m) => Text -> Param a -> m (Array a)
 params name (Param parser) = do
   request <- askRequest
   case lookupParam name request.params of
@@ -361,7 +428,7 @@ params name (Param parser) = do
         Nothing -> respondBadParameter
         Just result -> pure result
 
-respondBadParameter :: MonadHandler m => m void
+respondBadParameter :: (MonadHandler m) => m void
 respondBadParameter =
   respondWith (Wai.responseBuilder Http.status400 [] mempty)
 
@@ -369,7 +436,7 @@ respondBadParameter =
 -- Response
 
 -- | Respond to the client.
-respond :: MonadHandler m => Int -> [Http.Header] -> LazyByteString -> m void
+respond :: (MonadHandler m) => Int -> [Http.Header] -> LazyByteString -> m void
 respond status headers body =
   respondWith (Wai.responseLBS (intToStatus status) headers body)
 
@@ -380,11 +447,11 @@ data FileResponse = FileResponse
   }
 
 -- | Respond to the client with a file.
-respondFile :: MonadHandler m => FileResponse -> m void
+respondFile :: (MonadHandler m) => FileResponse -> m void
 respondFile FileResponse {file, headers, status} =
   respondWith (Wai.responseFile status headers file Nothing)
 
-respondWith :: MonadHandler m => Wai.Response -> m void
+respondWith :: (MonadHandler m) => Wai.Response -> m void
 respondWith response = do
   resp <- askRespond
   liftIO do
