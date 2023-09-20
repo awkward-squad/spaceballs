@@ -33,8 +33,8 @@ module Spaceballs
 
     -- ** Response
     respond,
-    FileResponse (..),
     respondFile,
+    respondStream,
   )
 where
 
@@ -44,6 +44,7 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64.URL qualified as Base64.Url
+import Data.ByteString.Builder qualified as ByteString (Builder)
 import Data.ByteString.Lazy (LazyByteString)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.CaseInsensitive qualified as CaseInsensitive
@@ -440,16 +441,17 @@ respond :: (MonadHandler m) => Int -> [Http.Header] -> LazyByteString -> m void
 respond status headers body =
   respondWith (Wai.responseLBS (intToStatus status) headers body)
 
-data FileResponse = FileResponse
-  { status :: !Http.Status,
-    headers :: ![Http.Header],
-    file :: !FilePath
-  }
-
 -- | Respond to the client with a file.
-respondFile :: (MonadHandler m) => FileResponse -> m void
-respondFile FileResponse {file, headers, status} =
-  respondWith (Wai.responseFile status headers file Nothing)
+respondFile :: (MonadHandler m) => [Http.Header] -> FilePath -> m void
+respondFile headers file =
+  -- status is irrelevant here because warp ignores it (lolwtf?)
+  -- https://github.com/yesodweb/wai/issues/527
+  respondWith (Wai.responseFile Http.status200 headers file Nothing)
+
+-- | Respond to the client with a stream of bytes.
+respondStream :: (MonadHandler m) => Int -> [Http.Header] -> ((ByteString.Builder -> IO ()) -> IO ()) -> m void
+respondStream status headers withSend =
+  respondWith (Wai.responseStream (intToStatus status) headers \send _flush -> withSend send)
 
 respondWith :: (MonadHandler m) => Wai.Response -> m void
 respondWith response = do
