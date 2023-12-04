@@ -25,6 +25,9 @@ module Spaceballs
     Params,
     makeRequest,
 
+    -- *** Headers
+    header,
+
     -- *** Query params
     Param,
     ptext,
@@ -328,6 +331,14 @@ makeHeaders =
           Nothing -> Just v1
           Just v2 -> Just (v2 <> ", " <> v1)
         v1 = Text.decodeUtf8 v0
+
+------------------------------------------------------------------------------------------------------------------------
+-- Headers
+
+header :: MonadHandler m => CaseInsensitive.CI Text -> m (Maybe Text)
+header name = do
+  request <- askRequest
+  pure (Map.lookup name request.headers)
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Params
