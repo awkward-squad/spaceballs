@@ -291,7 +291,7 @@ type Respond =
 
 data Request = Request
   { body :: !ByteString,
-    headers :: ![(CaseInsensitive.CI Text, Text)],
+    headers :: !(Map (CaseInsensitive.CI Text) Text),
     id :: !Text,
     method :: !Http.Method,
     params :: !Params,
@@ -306,13 +306,28 @@ makeRequest request = do
   pure
     Request
       { body,
-        headers =
-          map (\(k, v) -> (CaseInsensitive.map Text.decodeUtf8 k, Text.decodeUtf8 v)) (Wai.requestHeaders request),
+        headers = makeHeaders (Wai.requestHeaders request),
         id,
         method = Wai.requestMethod request,
         params = makeParams (Wai.queryString request),
         path = Wai.pathInfo request
       }
+
+makeHeaders :: [(CaseInsensitive.CI ByteString, ByteString)] -> Map (CaseInsensitive.CI Text) Text
+makeHeaders =
+  List.foldl' step Map.empty
+  where
+    step ::
+      Map (CaseInsensitive.CI Text) Text ->
+      (CaseInsensitive.CI ByteString, ByteString) ->
+      Map (CaseInsensitive.CI Text) Text
+    step acc (k, v0) =
+      Map.alter f (CaseInsensitive.map Text.decodeUtf8 k) acc
+      where
+        f = \case
+          Nothing -> Just v1
+          Just v2 -> Just (v2 <> ", " <> v1)
+        v1 = Text.decodeUtf8 v0
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Params
