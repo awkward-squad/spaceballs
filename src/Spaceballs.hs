@@ -17,7 +17,6 @@ module Spaceballs
     segment,
 
     -- * Handler monad
-    MonadHandler (..),
     Respond,
 
     -- ** Request
@@ -42,8 +41,7 @@ module Spaceballs
 where
 
 import Control.Applicative (Alternative (..))
-import Control.Exception (Exception, throwIO, try)
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Exception (Exception (..), asyncExceptionFromException, asyncExceptionToException, throwIO, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64.URL qualified as Base64.Url
@@ -75,81 +73,89 @@ import Prelude hiding (id)
 -- Application
 
 -- | Make a WAI application.
-application ::
-  (MonadHandler m) =>
-  (forall a. m a -> IO a) ->
-  [Router m] ->
-  IO Wai.ResponseReceived
-application runHandler routers = do
+application :: [Router] -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
+application routers request resp = do
   let router = concatRouters routers
-  request <- runHandler askRequest
-  resp <- runHandler askRespond
   let handlers = routerHandlersAtPath router request.path
   if isEmptyHandlers handlers
     then resp (Wai.responseBuilder Http.status404 [] mempty)
     else case findHandler handlers request.method of
       NoHandler -> resp (Wai.responseBuilder Http.status405 [] mempty)
       Handler handler ->
-        try (runHandler handler) >>= \case
-          Left (Done sent) -> pure sent
+        try (handler request) >>= \case
+          Left (Sent sent) -> pure sent
           Right v -> absurd v
 
--- Internal exception type that indicates we've responded to the client.
--- TODO make this an async exception so it's less likely to be caught and ignored
-newtype Done
-  = Done Wai.ResponseReceived
-  deriving anyclass (Exception)
+-- Internal exception type that indicates we have a response for the client.
+newtype Respond
+  = Respond Wai.Response
 
-instance Show Done where
-  show (Done _) = "Done"
+instance Exception Respond where
+  fromException = asyncExceptionFromException
+  toException = asyncExceptionToException
+
+instance Show Respond where
+  show _ = "Respond"
+
+-- Internal exception type that indicates we've sent a response to the client.
+newtype Sent
+  = Sent Wai.ResponseReceived
+
+instance Exception Sent where
+  fromException = asyncExceptionFromException
+  toException = asyncExceptionToException
+
+instance Show Sent where
+  show _ = "Sent"
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Router
 
-data Router m = Router
-  { handlers :: !(Handlers m),
-    children :: !(Mapping Text (Router m))
+data Router = Router
+  { handlers :: !Handlers,
+    children :: !(Mapping Text Router)
   }
 
 -- A lot of ugly code here just to get a `Router` that doesn't have a user-visible `Semigroup` instance... heh.
 -- There's no harm in the instance, it just seems cleaner to give the user only one way to do things (namely, to
 -- define each router as an element in a list, and not be able to <> them together).
-newtype RouterWithSemigroup m
-  = RouterWithSemigroup (Router m)
+newtype RouterWithSemigroup
+  = RouterWithSemigroup Router
 
-instance Semigroup (RouterWithSemigroup m) where
-  RouterWithSemigroup x <> RouterWithSemigroup y = RouterWithSemigroup (appendRouters x y)
+instance Semigroup RouterWithSemigroup where
+  RouterWithSemigroup x <> RouterWithSemigroup y =
+    RouterWithSemigroup (appendRouters x y)
 
-emptyRouter :: Router m
+emptyRouter :: Router
 emptyRouter =
   Router emptyHandlers EmptyMapping
 
-appendRouters :: forall m. Router m -> Router m -> Router m
+appendRouters :: Router -> Router -> Router
 appendRouters x y =
   Router
     (x.handlers <> y.handlers)
     ( coerce
-        @(Mapping Text (RouterWithSemigroup m))
-        @(Mapping Text (Router m))
-        ( coerce @(Mapping Text (Router m)) @(Mapping Text (RouterWithSemigroup m)) x.children
-            <> coerce @(Mapping Text (Router m)) @(Mapping Text (RouterWithSemigroup m)) y.children
+        @(Mapping Text RouterWithSemigroup)
+        @(Mapping Text Router)
+        ( coerce @(Mapping Text Router) @(Mapping Text RouterWithSemigroup) x.children
+            <> coerce @(Mapping Text Router) @(Mapping Text RouterWithSemigroup) y.children
         )
     )
 
-concatRouters :: forall m. [Router m] -> Router m
+concatRouters :: [Router] -> Router
 concatRouters =
   coerce
-    @([RouterWithSemigroup m] -> RouterWithSemigroup m)
-    @([Router m] -> Router m)
+    @([RouterWithSemigroup] -> RouterWithSemigroup)
+    @([Router] -> Router)
     concatRoutersWithSemigroup
 
-concatRoutersWithSemigroup :: forall m. [RouterWithSemigroup m] -> RouterWithSemigroup m
+concatRoutersWithSemigroup :: [RouterWithSemigroup] -> RouterWithSemigroup
 concatRoutersWithSemigroup = \case
   [] -> RouterWithSemigroup emptyRouter
   x : xs ->
     x <> foldr (<>) (RouterWithSemigroup emptyRouter) xs
 
-routerHandlersAtPath :: Router m -> [Text] -> Handlers m
+routerHandlersAtPath :: Router -> [Text] -> Handlers
 routerHandlersAtPath router = \case
   [] -> router.handlers
   x : xs ->
@@ -158,49 +164,49 @@ routerHandlersAtPath router = \case
       Just router1 -> routerHandlersAtPath router1 xs
 
 -- | @DELETE@ a resource.
-delete :: m Void -> Router m
+delete :: (Request -> IO Void) -> Router
 delete handler =
   emptyRouter
     { handlers = emptyHandlers {delete = Handler handler}
     }
 
 -- | @GET@ a resource.
-get :: m Void -> Router m
+get :: (Request -> IO Void) -> Router
 get handler =
   emptyRouter
     { handlers = emptyHandlers {get = Handler handler}
     }
 
 -- | @PATCH@ a resource.
-patch :: m Void -> Router m
+patch :: (Request -> IO Void) -> Router
 patch handler =
   emptyRouter
     { handlers = emptyHandlers {patch = Handler handler}
     }
 
 -- | @POST@ a resource.
-post :: m Void -> Router m
+post :: (Request -> IO Void) -> Router
 post handler =
   emptyRouter
     { handlers = emptyHandlers {post = Handler handler}
     }
 
 -- | @PUT@ a resource.
-put :: m Void -> Router m
+put :: (Request -> IO Void) -> Router
 put handler =
   emptyRouter
     { handlers = emptyHandlers {put = Handler handler}
     }
 
 -- | Capture a path segment.
-capture :: (Text -> [Router m]) -> Router m
+capture :: (Text -> [Router]) -> Router
 capture f =
   emptyRouter
     { children = TotalMapping (concatRouters . f)
     }
 
 -- | Match a path segment.
-segment :: Text -> [Router m] -> Router m
+segment :: Text -> [Router] -> Router
 segment name router =
   emptyRouter
     { children = PartialMapping (Map.singleton name (concatRouters router))
@@ -236,29 +242,29 @@ runMapping = \case
 -- Handlers
 
 -- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
-data Handlers m = Handlers
-  { delete :: !(Handler m),
-    get :: !(Handler m),
-    patch :: !(Handler m),
-    post :: !(Handler m),
-    put :: !(Handler m)
+data Handlers = Handlers
+  { delete :: !Handler,
+    get :: !Handler,
+    patch :: !Handler,
+    post :: !Handler,
+    put :: !Handler
   }
 
 -- Left-biased
-instance Semigroup (Handlers m) where
+instance Semigroup Handlers where
   Handlers a1 b1 c1 d1 e1 <> Handlers a2 b2 c2 d2 e2 =
     Handlers (a1 <> a2) (b1 <> b2) (c1 <> c2) (d1 <> d2) (e1 <> e2)
 
-emptyHandlers :: Handlers m
+emptyHandlers :: Handlers
 emptyHandlers =
   Handlers NoHandler NoHandler NoHandler NoHandler NoHandler
 
-isEmptyHandlers :: Handlers m -> Bool
+isEmptyHandlers :: Handlers -> Bool
 isEmptyHandlers = \case
   Handlers NoHandler NoHandler NoHandler NoHandler NoHandler -> True
   _ -> False
 
-findHandler :: Handlers m -> Http.Method -> Handler m
+findHandler :: Handlers -> Http.Method -> Handler
 findHandler handlers method
   | method == Http.methodGet = handlers.get
   | method == Http.methodPost = handlers.post
@@ -270,24 +276,14 @@ findHandler handlers method
 ------------------------------------------------------------------------------------------------------------------------
 -- Resource handler
 
-data Handler m
+data Handler
   = NoHandler
-  | Handler !(m Void)
+  | Handler !(Request -> IO Void)
 
 -- Left-biased
-instance Semigroup (Handler m) where
+instance Semigroup Handler where
   NoHandler <> x = x
   x <> _ = x
-
-------------------------------------------------------------------------------------------------------------------------
--- Handler monad
-
-class (MonadIO m) => MonadHandler m where
-  askRequest :: m Request
-  askRespond :: m Respond
-
-type Respond =
-  Wai.Response -> IO Wai.ResponseReceived
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Request
@@ -335,10 +331,9 @@ makeHeaders =
 ------------------------------------------------------------------------------------------------------------------------
 -- Headers
 
-header :: MonadHandler m => CaseInsensitive.CI Text -> m (Maybe Text)
-header name = do
-  request <- askRequest
-  pure (Map.lookup name request.headers)
+header :: Request -> CaseInsensitive.CI Text -> Maybe Text
+header request name =
+  Map.lookup name request.headers
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Params
@@ -432,9 +427,8 @@ ptext =
 -- | Get an optional parameter from the request.
 --
 -- If multiple parameters with the given name exist, this function returns the first.
-param :: (MonadHandler m) => Text -> Param a -> m (Maybe a)
-param name (Param parser) = do
-  request <- askRequest
+param :: Request -> Text -> Param a -> IO (Maybe a)
+param request name (Param parser) = do
   case lookupParam name request.params of
     Nothing -> pure Nothing
     Just p ->
@@ -445,9 +439,8 @@ param name (Param parser) = do
 -- | Get an optional parameter from the request.
 --
 -- If multiple parameters with the given name exist, this function returns them all.
-params :: (MonadHandler m) => Text -> Param a -> m (Array a)
-params name (Param parser) = do
-  request <- askRequest
+params :: Request -> Text -> Param a -> IO (Array a)
+params request name (Param parser) =
   case lookupParam name request.params of
     Nothing -> pure Array.emptyArray
     Just p ->
@@ -455,7 +448,7 @@ params name (Param parser) = do
         Nothing -> respondBadParameter
         Just result -> pure result
 
-respondBadParameter :: (MonadHandler m) => m void
+respondBadParameter :: IO void
 respondBadParameter =
   respondWith (Wai.responseBuilder Http.status400 [] mempty)
 
@@ -463,28 +456,31 @@ respondBadParameter =
 -- Response
 
 -- | Respond to the client.
-respond :: (MonadHandler m) => Int -> [Http.Header] -> LazyByteString -> m void
+respond :: Int -> [Http.Header] -> LazyByteString -> IO void
 respond status headers body =
   respondWith (Wai.responseLBS (intToStatus status) headers body)
 
 -- | Respond to the client with a file.
-respondFile :: (MonadHandler m) => [Http.Header] -> FilePath -> m void
+respondFile :: [Http.Header] -> FilePath -> IO void
 respondFile headers file =
   -- status is irrelevant here because warp ignores it (lolwtf?)
   -- https://github.com/yesodweb/wai/issues/527
   respondWith (Wai.responseFile Http.status200 headers file Nothing)
 
 -- | Respond to the client with a stream of bytes.
-respondStream :: (MonadHandler m) => Int -> [Http.Header] -> ((ByteString.Builder -> IO ()) -> IO ()) -> m void
-respondStream status headers withSend =
-  respondWith (Wai.responseStream (intToStatus status) headers \send _flush -> withSend send)
+respondStream ::
+  (Wai.Response -> IO Wai.ResponseReceived) ->
+  Int ->
+  [Http.Header] ->
+  ((ByteString.Builder -> IO ()) -> IO ()) ->
+  IO void
+respondStream resp status headers withSend = do
+  sent <- resp (Wai.responseStream (intToStatus status) headers \send _flush -> withSend send)
+  throwIO (Sent sent)
 
-respondWith :: (MonadHandler m) => Wai.Response -> m void
-respondWith response = do
-  resp <- askRespond
-  liftIO do
-    sent <- resp response
-    throwIO (Done sent)
+respondWith :: Wai.Response -> IO void
+respondWith response =
+  throwIO (Respond response)
 
 intToStatus :: Int -> Http.Status
 intToStatus = \case
