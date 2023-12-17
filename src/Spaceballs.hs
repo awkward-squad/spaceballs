@@ -16,9 +16,6 @@ module Spaceballs
     capture,
     segment,
 
-    -- * Handler monad
-    Respond,
-
     -- ** Request
     Request (..),
     Params,
@@ -73,18 +70,19 @@ import Prelude hiding (id)
 -- Application
 
 -- | Make a WAI application.
-application :: [Router] -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
-application routers request resp = do
+application :: [Router] -> (Request -> IO Void) -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
+application routers notFoundHandler request resp = do
   let router = concatRouters routers
   let handlers = routerHandlersAtPath router request.path
-  if isEmptyHandlers handlers
-    then resp (Wai.responseBuilder Http.status404 [] mempty)
-    else case findHandler handlers request.method of
-      NoHandler -> resp (Wai.responseBuilder Http.status405 [] mempty)
-      Handler handler ->
-        try (handler request) >>= \case
-          Left (Sent sent) -> pure sent
-          Right v -> absurd v
+  case if isEmptyHandlers handlers then Handler notFoundHandler else findHandler handlers request.method of
+    NoHandler -> resp (Wai.responseBuilder Http.status405 [] mempty)
+    Handler handler ->
+      try (handler request) >>= \case
+        Left exception
+          | Just (Respond response) <- fromException @Respond exception -> resp response
+          | Just (Sent sent) <- fromException @Sent exception -> pure sent
+          | otherwise -> throwIO exception
+        Right v -> absurd v
 
 -- Internal exception type that indicates we have a response for the client.
 newtype Respond
@@ -112,7 +110,7 @@ instance Show Sent where
 -- Router
 
 data Router = Router
-  { handlers :: !Handlers,
+  { handlers :: !ResourceHandlers,
     children :: !(Mapping Text Router)
   }
 
@@ -123,12 +121,12 @@ newtype RouterWithSemigroup
   = RouterWithSemigroup Router
 
 instance Semigroup RouterWithSemigroup where
-  RouterWithSemigroup x <> RouterWithSemigroup y =
-    RouterWithSemigroup (appendRouters x y)
+  (<>) :: RouterWithSemigroup -> RouterWithSemigroup -> RouterWithSemigroup
+  (<>) = coerce appendRouters
 
 emptyRouter :: Router
 emptyRouter =
-  Router emptyHandlers EmptyMapping
+  Router emptyResourceHandlers EmptyMapping
 
 appendRouters :: Router -> Router -> Router
 appendRouters x y =
@@ -155,47 +153,47 @@ concatRoutersWithSemigroup = \case
   x : xs ->
     x <> foldr (<>) (RouterWithSemigroup emptyRouter) xs
 
-routerHandlersAtPath :: Router -> [Text] -> Handlers
+routerHandlersAtPath :: Router -> [Text] -> ResourceHandlers
 routerHandlersAtPath router = \case
   [] -> router.handlers
   x : xs ->
     case runMapping router.children x of
-      Nothing -> emptyHandlers
+      Nothing -> emptyResourceHandlers
       Just router1 -> routerHandlersAtPath router1 xs
 
 -- | @DELETE@ a resource.
 delete :: (Request -> IO Void) -> Router
 delete handler =
   emptyRouter
-    { handlers = emptyHandlers {delete = Handler handler}
+    { handlers = emptyResourceHandlers {delete = Handler handler}
     }
 
 -- | @GET@ a resource.
 get :: (Request -> IO Void) -> Router
 get handler =
   emptyRouter
-    { handlers = emptyHandlers {get = Handler handler}
+    { handlers = emptyResourceHandlers {get = Handler handler}
     }
 
 -- | @PATCH@ a resource.
 patch :: (Request -> IO Void) -> Router
 patch handler =
   emptyRouter
-    { handlers = emptyHandlers {patch = Handler handler}
+    { handlers = emptyResourceHandlers {patch = Handler handler}
     }
 
 -- | @POST@ a resource.
 post :: (Request -> IO Void) -> Router
 post handler =
   emptyRouter
-    { handlers = emptyHandlers {post = Handler handler}
+    { handlers = emptyResourceHandlers {post = Handler handler}
     }
 
 -- | @PUT@ a resource.
 put :: (Request -> IO Void) -> Router
 put handler =
   emptyRouter
-    { handlers = emptyHandlers {put = Handler handler}
+    { handlers = emptyResourceHandlers {put = Handler handler}
     }
 
 -- | Capture a path segment.
@@ -242,7 +240,7 @@ runMapping = \case
 -- Handlers
 
 -- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
-data Handlers = Handlers
+data ResourceHandlers = ResourceHandlers
   { delete :: !Handler,
     get :: !Handler,
     patch :: !Handler,
@@ -251,20 +249,20 @@ data Handlers = Handlers
   }
 
 -- Left-biased
-instance Semigroup Handlers where
-  Handlers a1 b1 c1 d1 e1 <> Handlers a2 b2 c2 d2 e2 =
-    Handlers (a1 <> a2) (b1 <> b2) (c1 <> c2) (d1 <> d2) (e1 <> e2)
+instance Semigroup ResourceHandlers where
+  ResourceHandlers a1 b1 c1 d1 e1 <> ResourceHandlers a2 b2 c2 d2 e2 =
+    ResourceHandlers (a1 <> a2) (b1 <> b2) (c1 <> c2) (d1 <> d2) (e1 <> e2)
 
-emptyHandlers :: Handlers
-emptyHandlers =
-  Handlers NoHandler NoHandler NoHandler NoHandler NoHandler
+emptyResourceHandlers :: ResourceHandlers
+emptyResourceHandlers =
+  ResourceHandlers NoHandler NoHandler NoHandler NoHandler NoHandler
 
-isEmptyHandlers :: Handlers -> Bool
+isEmptyHandlers :: ResourceHandlers -> Bool
 isEmptyHandlers = \case
-  Handlers NoHandler NoHandler NoHandler NoHandler NoHandler -> True
+  ResourceHandlers NoHandler NoHandler NoHandler NoHandler NoHandler -> True
   _ -> False
 
-findHandler :: Handlers -> Http.Method -> Handler
+findHandler :: ResourceHandlers -> Http.Method -> Handler
 findHandler handlers method
   | method == Http.methodGet = handlers.get
   | method == Http.methodPost = handlers.post
