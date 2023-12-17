@@ -16,20 +16,28 @@ module Spaceballs
     capture,
     segment,
 
-    -- ** Request
+    -- * Request
     Request (..),
     Params,
 
-    -- *** Headers
+    -- ** Headers
     header,
 
-    -- *** Query params
+    -- ** Query params
     Param,
     ptext,
     param,
     params,
 
-    -- ** Response
+    -- * Response
+
+    -- ** Building
+    Response,
+    response,
+    addHeader,
+    setBody,
+
+    -- ** Sending
     respond,
     respondFile,
     respondStream,
@@ -42,7 +50,6 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64.URL qualified as Base64.Url
 import Data.ByteString.Builder qualified as ByteString (Builder)
-import Data.ByteString.Lazy (LazyByteString)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.CaseInsensitive qualified as CaseInsensitive
 import Data.Coerce (coerce)
@@ -454,10 +461,46 @@ respondBadParameter =
 ------------------------------------------------------------------------------------------------------------------------
 -- Response
 
+data Response = Response
+  { body :: !ByteString,
+    headers :: ![Http.Header],
+    status :: {-# UNPACK #-} !Int
+  }
+
+response :: Int -> Response
+response status =
+  Response {body = ByteString.empty, headers = [], status}
+
+addHeader :: Text -> Text -> Response -> Response
+addHeader key value resp =
+  Response
+    { body = resp.body,
+      headers = (key', value') : resp.headers,
+      status = resp.status
+    }
+  where
+    !key' = CaseInsensitive.mk (Text.encodeUtf8 key)
+    !value' = Text.encodeUtf8 value
+
+setBody :: ByteString -> Response -> Response
+setBody body resp =
+  Response
+    { body,
+      headers = resp.headers,
+      status = resp.status
+    }
+
+responseToWai :: Response -> Wai.Response
+responseToWai resp =
+  Wai.responseLBS
+    (intToStatus resp.status)
+    resp.headers
+    (LazyByteString.fromStrict resp.body)
+
 -- | Respond to the client.
-respond :: Int -> [Http.Header] -> LazyByteString -> IO void
-respond status headers body =
-  respondWith (Wai.responseLBS (intToStatus status) headers body)
+respond :: Response -> IO void
+respond =
+  respondWith . responseToWai
 
 -- | Respond to the client with a file.
 respondFile :: [Http.Header] -> FilePath -> IO void
@@ -478,8 +521,8 @@ respondStream resp status headers withSend = do
   throwIO (Sent sent)
 
 respondWith :: Wai.Response -> IO void
-respondWith response =
-  throwIO (Respond response)
+respondWith resp =
+  throwIO (Respond resp)
 
 intToStatus :: Int -> Http.Status
 intToStatus = \case
