@@ -19,7 +19,6 @@ module Spaceballs
     -- ** Request
     Request (..),
     Params,
-    makeRequest,
 
     -- *** Headers
     header,
@@ -70,19 +69,21 @@ import Prelude hiding (id)
 -- Application
 
 -- | Make a WAI application.
-application :: [Router] -> (Request -> IO Void) -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Wai.ResponseReceived
-application routers notFoundHandler request resp = do
-  let router = concatRouters routers
-  let handlers = routerHandlersAtPath router request.path
-  case if isEmptyHandlers handlers then Handler notFoundHandler else findHandler handlers request.method of
-    NoHandler -> resp (Wai.responseBuilder Http.status405 [] mempty)
-    Handler handler ->
-      try (handler request) >>= \case
-        Left exception
-          | Just (Respond response) <- fromException @Respond exception -> resp response
-          | Just (Sent sent) <- fromException @Sent exception -> pure sent
-          | otherwise -> throwIO exception
-        Right v -> absurd v
+application :: [Router] -> (Request -> IO Void) -> Wai.Application
+application routers notFoundHandler =
+  \request0 resp -> do
+    request <- makeRequest request0
+    let router = concatRouters routers
+    let handlers = routerHandlersAtPath router request.path
+    case if isEmptyHandlers handlers then Handler notFoundHandler else findHandler handlers request.method of
+      NoHandler -> resp (Wai.responseBuilder Http.status405 [] mempty)
+      Handler handler ->
+        try (handler request) >>= \case
+          Left exception
+            | Just (Respond response) <- fromException @Respond exception -> resp response
+            | Just (Sent sent) <- fromException @Sent exception -> pure sent
+            | otherwise -> throwIO exception
+          Right v -> absurd v
 
 -- Internal exception type that indicates we have a response for the client.
 newtype Respond
