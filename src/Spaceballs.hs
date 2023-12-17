@@ -32,7 +32,7 @@ module Spaceballs
     -- * Response
 
     -- ** Building
-    Response,
+    Response (..),
     response,
     addHeader,
     setBody,
@@ -82,9 +82,9 @@ application routers notFoundHandler =
     request <- makeRequest request0
     let router = concatRouters routers
     let handlers = routerHandlersAtPath router request.path
-    case if isEmptyHandlers handlers then Handler notFoundHandler else findHandler handlers request.method of
+    case if isEmptyHandlers handlers then YesHandler notFoundHandler else findHandler handlers request.method of
       NoHandler -> respond_ (Wai.responseBuilder Http.status405 [] mempty)
-      Handler handler ->
+      YesHandler handler ->
         try (handler request) >>= \case
           Left exception
             | Just (Respond response_) <- fromException @Respond exception -> respond_ response_
@@ -173,35 +173,35 @@ routerHandlersAtPath router = \case
 delete :: (Request -> IO Void) -> Router
 delete handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {delete = Handler handler}
+    { handlers = emptyResourceHandlers {delete = YesHandler handler}
     }
 
 -- | @GET@ a resource.
 get :: (Request -> IO Void) -> Router
 get handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {get = Handler handler}
+    { handlers = emptyResourceHandlers {get = YesHandler handler}
     }
 
 -- | @PATCH@ a resource.
 patch :: (Request -> IO Void) -> Router
 patch handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {patch = Handler handler}
+    { handlers = emptyResourceHandlers {patch = YesHandler handler}
     }
 
 -- | @POST@ a resource.
 post :: (Request -> IO Void) -> Router
 post handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {post = Handler handler}
+    { handlers = emptyResourceHandlers {post = YesHandler handler}
     }
 
 -- | @PUT@ a resource.
 put :: (Request -> IO Void) -> Router
 put handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {put = Handler handler}
+    { handlers = emptyResourceHandlers {put = YesHandler handler}
     }
 
 -- | Capture a path segment.
@@ -249,11 +249,11 @@ runMapping = \case
 
 -- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
 data ResourceHandlers = ResourceHandlers
-  { delete :: !Handler,
-    get :: !Handler,
-    patch :: !Handler,
-    post :: !Handler,
-    put :: !Handler
+  { delete :: !MaybeHandler,
+    get :: !MaybeHandler,
+    patch :: !MaybeHandler,
+    post :: !MaybeHandler,
+    put :: !MaybeHandler
   }
 
 -- Left-biased
@@ -270,7 +270,7 @@ isEmptyHandlers = \case
   ResourceHandlers NoHandler NoHandler NoHandler NoHandler NoHandler -> True
   _ -> False
 
-findHandler :: ResourceHandlers -> Http.Method -> Handler
+findHandler :: ResourceHandlers -> Http.Method -> MaybeHandler
 findHandler handlers method
   | method == Http.methodGet = handlers.get
   | method == Http.methodPost = handlers.post
@@ -282,12 +282,12 @@ findHandler handlers method
 ------------------------------------------------------------------------------------------------------------------------
 -- Resource handler
 
-data Handler
+data MaybeHandler
   = NoHandler
-  | Handler !(Request -> IO Void)
+  | YesHandler !(Request -> IO Void)
 
 -- Left-biased
-instance Semigroup Handler where
+instance Semigroup MaybeHandler where
   NoHandler <> x = x
   x <> _ = x
 
