@@ -20,9 +20,6 @@ module Spaceballs
     Request (..),
     Params,
 
-    -- ** Headers
-    header,
-
     -- ** Query params
     Param,
     ptext,
@@ -41,6 +38,11 @@ module Spaceballs
     respond,
     respondFile,
     respondStream,
+
+    -- * Headers
+    Headers,
+    getHeader,
+    foldHeaders,
   )
 where
 
@@ -68,6 +70,7 @@ import GHC.Generics (Generic)
 import Network.HTTP.Types qualified as Http
 import Network.HTTP.Types.Status qualified as Http
 import Network.Wai qualified as Wai
+import Spaceballs.Headers (Headers, foldHeaders, getHeader, makeHeaders)
 import System.Random.Stateful qualified as Random
 import Unsafe.Coerce (unsafeCoerce)
 import Prelude hiding (id)
@@ -296,7 +299,7 @@ instance Semigroup MaybeHandler where
 
 data Request = Request
   { body :: !ByteString,
-    headers :: !(Map (CaseInsensitive.CI Text) Text),
+    headers :: !Headers,
     id :: !Text,
     method :: !Http.Method,
     params :: !Params,
@@ -317,29 +320,6 @@ makeRequest request = do
         params = makeParams (Wai.queryString request),
         path = Wai.pathInfo request
       }
-
-makeHeaders :: [(CaseInsensitive.CI ByteString, ByteString)] -> Map (CaseInsensitive.CI Text) Text
-makeHeaders =
-  List.foldl' step Map.empty
-  where
-    step ::
-      Map (CaseInsensitive.CI Text) Text ->
-      (CaseInsensitive.CI ByteString, ByteString) ->
-      Map (CaseInsensitive.CI Text) Text
-    step acc (k, v0) =
-      Map.alter f (CaseInsensitive.map Text.decodeUtf8 k) acc
-      where
-        f = \case
-          Nothing -> Just v1
-          Just v2 -> Just (v2 <> ", " <> v1)
-        v1 = Text.decodeUtf8 v0
-
-------------------------------------------------------------------------------------------------------------------------
--- Headers
-
-header :: Request -> CaseInsensitive.CI Text -> Maybe Text
-header request name =
-  Map.lookup name request.headers
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Params
