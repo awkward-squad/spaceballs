@@ -4,6 +4,9 @@ module Spaceballs
 
     -- * Router
     Router,
+    Resource,
+    route,
+    act,
 
     -- ** Resources
     delete,
@@ -36,8 +39,6 @@ module Spaceballs
 
     -- ** Sending
     respond,
-    respondFile,
-    respondStream,
 
     -- * Headers
     Headers,
@@ -51,7 +52,6 @@ import Control.Exception (Exception (..), asyncExceptionFromException, asyncExce
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64.URL qualified as Base64.Url
-import Data.ByteString.Builder qualified as ByteString (Builder)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.CaseInsensitive qualified as CaseInsensitive
 import Data.Coerce (coerce)
@@ -79,21 +79,14 @@ import Prelude hiding (id)
 -- Application
 
 -- | Make a WAI application.
-application :: [Router] -> (Request -> IO Void) -> Wai.Application
-application routers notFoundHandler =
-  \request0 respond_ -> do
-    request <- makeRequest request0
-    let router = concatRouters routers
-    let handlers = routerHandlersAtPath router request.path
-    case if isEmptyHandlers handlers then YesHandler notFoundHandler else findHandler handlers request.method of
-      NoHandler -> respond_ (Wai.responseBuilder Http.status405 [] mempty)
-      YesHandler handler ->
-        try (handler request) >>= \case
-          Left exception
-            | Just (Respond response_) <- fromException @Respond exception -> respond_ response_
-            | Just (Sent sent) <- fromException @Sent exception -> pure sent
-            | otherwise -> throwIO exception
-          Right v -> absurd v
+application :: (Request -> IO Void) -> Wai.Application
+application app request0 respond_ = do
+  request <- makeRequest request0
+  try (app request) >>= \case
+    Left exception
+      | Just (Respond response_) <- fromException @Respond exception -> respond_ response_
+      | otherwise -> throwIO exception
+    Right v -> absurd v
 
 -- Internal exception type that indicates we have a response for the client.
 newtype Respond
@@ -106,22 +99,11 @@ instance Exception Respond where
 instance Show Respond where
   show _ = "Respond"
 
--- Internal exception type that indicates we've sent a response to the client.
-newtype Sent
-  = Sent Wai.ResponseReceived
-
-instance Exception Sent where
-  fromException = asyncExceptionFromException
-  toException = asyncExceptionToException
-
-instance Show Sent where
-  show _ = "Sent"
-
 ------------------------------------------------------------------------------------------------------------------------
 -- Router
 
 data Router = Router
-  { handlers :: !ResourceHandlers,
+  { resource :: !Resource,
     children :: !(Mapping Text Router)
   }
 
@@ -137,12 +119,12 @@ instance Semigroup RouterWithSemigroup where
 
 emptyRouter :: Router
 emptyRouter =
-  Router emptyResourceHandlers EmptyMapping
+  Router emptyResource EmptyMapping
 
 appendRouters :: Router -> Router -> Router
 appendRouters x y =
   Router
-    (x.handlers <> y.handlers)
+    (x.resource <> y.resource)
     ( coerce
         @(Mapping Text RouterWithSemigroup)
         @(Mapping Text Router)
@@ -164,47 +146,61 @@ concatRoutersWithSemigroup = \case
   x : xs ->
     x <> foldr (<>) (RouterWithSemigroup emptyRouter) xs
 
-routerHandlersAtPath :: Router -> [Text] -> ResourceHandlers
-routerHandlersAtPath router = \case
-  [] -> router.handlers
-  x : xs ->
-    case runMapping router.children x of
-      Nothing -> emptyResourceHandlers
-      Just router1 -> routerHandlersAtPath router1 xs
+-- | Route a request to a resource.
+route :: [Router] -> [Text] -> Maybe Resource
+route =
+  route1 . concatRouters
+
+route1 :: Router -> [Text] -> Maybe Resource
+route1 router = \case
+  [] -> Just router.resource
+  segment_ : segments -> do
+    router1 <- runMapping router.children segment_
+    route1 router1 segments
+
+-- | Act upon a resource.
+act :: Resource -> Http.Method -> Maybe (Text -> Params -> Headers -> ByteString -> IO Void)
+act resource method
+  | method == Http.methodGet = resource.get
+  | method == Http.methodPost = resource.post
+  | method == Http.methodPut = resource.put
+  | method == Http.methodDelete = resource.delete
+  | method == Http.methodPatch = resource.patch
+  | otherwise = Nothing
 
 -- | @DELETE@ a resource.
-delete :: (Request -> IO Void) -> Router
+delete :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
 delete handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {delete = YesHandler handler}
+    { resource = emptyResource {delete = Just handler}
     }
 
 -- | @GET@ a resource.
-get :: (Request -> IO Void) -> Router
+get :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
 get handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {get = YesHandler handler}
+    { resource = emptyResource {get = Just handler}
     }
 
 -- | @PATCH@ a resource.
-patch :: (Request -> IO Void) -> Router
+patch :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
 patch handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {patch = YesHandler handler}
+    { resource = emptyResource {patch = Just handler}
     }
 
 -- | @POST@ a resource.
-post :: (Request -> IO Void) -> Router
+post :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
 post handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {post = YesHandler handler}
+    { resource = emptyResource {post = Just handler}
     }
 
 -- | @PUT@ a resource.
-put :: (Request -> IO Void) -> Router
+put :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
 put handler =
   emptyRouter
-    { handlers = emptyResourceHandlers {put = YesHandler handler}
+    { resource = emptyResource {put = Just handler}
     }
 
 -- | Capture a path segment.
@@ -251,48 +247,22 @@ runMapping = \case
 -- Handlers
 
 -- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
-data ResourceHandlers = ResourceHandlers
-  { delete :: !MaybeHandler,
-    get :: !MaybeHandler,
-    patch :: !MaybeHandler,
-    post :: !MaybeHandler,
-    put :: !MaybeHandler
+data Resource = Resource
+  { delete :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void)),
+    get :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void)),
+    patch :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void)),
+    post :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void)),
+    put :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void))
   }
 
 -- Left-biased
-instance Semigroup ResourceHandlers where
-  ResourceHandlers a1 b1 c1 d1 e1 <> ResourceHandlers a2 b2 c2 d2 e2 =
-    ResourceHandlers (a1 <> a2) (b1 <> b2) (c1 <> c2) (d1 <> d2) (e1 <> e2)
+instance Semigroup Resource where
+  Resource a1 b1 c1 d1 e1 <> Resource a2 b2 c2 d2 e2 =
+    Resource (a1 <|> a2) (b1 <|> b2) (c1 <|> c2) (d1 <|> d2) (e1 <|> e2)
 
-emptyResourceHandlers :: ResourceHandlers
-emptyResourceHandlers =
-  ResourceHandlers NoHandler NoHandler NoHandler NoHandler NoHandler
-
-isEmptyHandlers :: ResourceHandlers -> Bool
-isEmptyHandlers = \case
-  ResourceHandlers NoHandler NoHandler NoHandler NoHandler NoHandler -> True
-  _ -> False
-
-findHandler :: ResourceHandlers -> Http.Method -> MaybeHandler
-findHandler handlers method
-  | method == Http.methodGet = handlers.get
-  | method == Http.methodPost = handlers.post
-  | method == Http.methodPut = handlers.put
-  | method == Http.methodDelete = handlers.delete
-  | method == Http.methodPatch = handlers.patch
-  | otherwise = NoHandler
-
-------------------------------------------------------------------------------------------------------------------------
--- Resource handler
-
-data MaybeHandler
-  = NoHandler
-  | YesHandler !(Request -> IO Void)
-
--- Left-biased
-instance Semigroup MaybeHandler where
-  NoHandler <> x = x
-  x <> _ = x
+emptyResource :: Resource
+emptyResource =
+  Resource Nothing Nothing Nothing Nothing Nothing
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Request
@@ -436,7 +406,7 @@ params request name (Param parser) =
 
 respondBadParameter :: IO void
 respondBadParameter =
-  respondWith (Wai.responseBuilder Http.status400 [] mempty)
+  respondWai (Wai.responseBuilder Http.status400 [] mempty)
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Response
@@ -484,29 +454,11 @@ responseToWai response_ =
 -- | Respond to the client.
 respond :: Response -> IO void
 respond =
-  respondWith . responseToWai
+  respondWai . responseToWai
 
--- | Respond to the client with a file.
-respondFile :: [Http.Header] -> FilePath -> IO void
-respondFile headers file =
-  -- status is irrelevant here because warp ignores it (lolwtf?)
-  -- https://github.com/yesodweb/wai/issues/527
-  respondWith (Wai.responseFile Http.status200 headers file Nothing)
-
--- | Respond to the client with a stream of bytes.
-respondStream ::
-  (Wai.Response -> IO Wai.ResponseReceived) ->
-  Int ->
-  [Http.Header] ->
-  ((ByteString.Builder -> IO ()) -> IO ()) ->
-  IO void
-respondStream respond_ status headers withSend = do
-  sent <- respond_ (Wai.responseStream (intToStatus status) headers \send _flush -> withSend send)
-  throwIO (Sent sent)
-
-respondWith :: Wai.Response -> IO void
-respondWith resp =
-  throwIO (Respond resp)
+respondWai :: Wai.Response -> IO void
+respondWai =
+  throwIO . Respond
 
 intToStatus :: Int -> Http.Status
 intToStatus = \case
