@@ -78,16 +78,16 @@ import Prelude hiding (id)
 -- | Make a WAI application.
 application :: [Router] -> (Request -> IO Void) -> Wai.Application
 application routers notFoundHandler =
-  \request0 resp -> do
+  \request0 respond_ -> do
     request <- makeRequest request0
     let router = concatRouters routers
     let handlers = routerHandlersAtPath router request.path
     case if isEmptyHandlers handlers then Handler notFoundHandler else findHandler handlers request.method of
-      NoHandler -> resp (Wai.responseBuilder Http.status405 [] mempty)
+      NoHandler -> respond_ (Wai.responseBuilder Http.status405 [] mempty)
       Handler handler ->
         try (handler request) >>= \case
           Left exception
-            | Just (Respond response) <- fromException @Respond exception -> resp response
+            | Just (Respond response_) <- fromException @Respond exception -> respond_ response_
             | Just (Sent sent) <- fromException @Sent exception -> pure sent
             | otherwise -> throwIO exception
           Right v -> absurd v
@@ -469,33 +469,37 @@ data Response = Response
 
 response :: Int -> Response
 response status =
-  Response {body = ByteString.empty, headers = [], status}
+  Response
+    { body = ByteString.empty,
+      headers = [],
+      status
+    }
 
 addHeader :: Text -> Text -> Response -> Response
-addHeader key value resp =
+addHeader key value response_ =
   Response
-    { body = resp.body,
-      headers = (key', value') : resp.headers,
-      status = resp.status
+    { body = response_.body,
+      headers = (key', value') : response_.headers,
+      status = response_.status
     }
   where
     !key' = CaseInsensitive.mk (Text.encodeUtf8 key)
     !value' = Text.encodeUtf8 value
 
 setBody :: ByteString -> Response -> Response
-setBody body resp =
+setBody body response_ =
   Response
     { body,
-      headers = resp.headers,
-      status = resp.status
+      headers = response_.headers,
+      status = response_.status
     }
 
 responseToWai :: Response -> Wai.Response
-responseToWai resp =
+responseToWai response_ =
   Wai.responseLBS
-    (intToStatus resp.status)
-    resp.headers
-    (LazyByteString.fromStrict resp.body)
+    (intToStatus response_.status)
+    response_.headers
+    (LazyByteString.fromStrict response_.body)
 
 -- | Respond to the client.
 respond :: Response -> IO void
@@ -516,8 +520,8 @@ respondStream ::
   [Http.Header] ->
   ((ByteString.Builder -> IO ()) -> IO ()) ->
   IO void
-respondStream resp status headers withSend = do
-  sent <- resp (Wai.responseStream (intToStatus status) headers \send _flush -> withSend send)
+respondStream respond_ status headers withSend = do
+  sent <- respond_ (Wai.responseStream (intToStatus status) headers \send _flush -> withSend send)
   throwIO (Sent sent)
 
 respondWith :: Wai.Response -> IO void
