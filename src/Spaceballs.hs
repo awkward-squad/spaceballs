@@ -34,7 +34,7 @@ module Spaceballs
     -- ** Building
     Response (..),
     response,
-    addHeader,
+    setHeaders,
     setBody,
 
     -- ** Sending
@@ -44,6 +44,13 @@ module Spaceballs
     Headers,
     getHeader,
     foldHeaders,
+    foldlHeaders,
+
+    -- ** Headers builder
+    HeadersBuilder,
+    emptyHeadersBuilder,
+    addHeader,
+    buildHeaders,
   )
 where
 
@@ -53,7 +60,6 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64.URL qualified as Base64.Url
 import Data.ByteString.Lazy qualified as LazyByteString
-import Data.CaseInsensitive qualified as CaseInsensitive
 import Data.Coerce (coerce)
 import Data.Kind (Type)
 import Data.List qualified as List
@@ -70,7 +76,7 @@ import GHC.Generics (Generic)
 import Network.HTTP.Types qualified as Http
 import Network.HTTP.Types.Status qualified as Http
 import Network.Wai qualified as Wai
-import Spaceballs.Headers (Headers, foldHeaders, getHeader, makeHeaders)
+import Spaceballs.Headers (Headers, HeadersBuilder, addHeader, addWaiHeaders, buildHeaders, emptyHeaders, emptyHeadersBuilder, foldHeaders, foldlHeaders, getHeader, headersToWaiHeaders)
 import System.Random.Stateful qualified as Random
 import Unsafe.Coerce (unsafeCoerce)
 import Prelude hiding (id)
@@ -284,7 +290,7 @@ makeRequest request = do
   pure
     Request
       { body,
-        headers = makeHeaders (Wai.requestHeaders request),
+        headers = buildHeaders (addWaiHeaders (Wai.requestHeaders request)),
         id,
         method = Wai.requestMethod request,
         params = makeParams (Wai.queryString request),
@@ -413,7 +419,7 @@ respondBadParameter =
 
 data Response = Response
   { body :: !ByteString,
-    headers :: ![Http.Header],
+    headers :: !Headers,
     status :: {-# UNPACK #-} !Int
   }
 
@@ -421,20 +427,17 @@ response :: Int -> Response
 response status =
   Response
     { body = ByteString.empty,
-      headers = [],
+      headers = emptyHeaders,
       status
     }
 
-addHeader :: Text -> Text -> Response -> Response
-addHeader key value response_ =
+setHeaders :: Headers -> Response -> Response
+setHeaders headers response_ =
   Response
     { body = response_.body,
-      headers = (key', value') : response_.headers,
+      headers = headers,
       status = response_.status
     }
-  where
-    !key' = CaseInsensitive.mk (Text.encodeUtf8 key)
-    !value' = Text.encodeUtf8 value
 
 setBody :: ByteString -> Response -> Response
 setBody body response_ =
@@ -448,7 +451,7 @@ responseToWai :: Response -> Wai.Response
 responseToWai response_ =
   Wai.responseLBS
     (intToStatus response_.status)
-    response_.headers
+    (headersToWaiHeaders response_.headers)
     (LazyByteString.fromStrict response_.body)
 
 -- | Respond to the client.
