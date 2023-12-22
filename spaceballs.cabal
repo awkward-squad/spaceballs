@@ -20,7 +20,7 @@ library
     ViewPatterns
   default-language: GHC2021
   build-depends:
-    base ^>= 4.16 || ^>= 4.17 || ^>= 4.18,
+    base ^>= 4.16 || ^>= 4.17 || ^>= 4.18 || ^>= 4.19,
     base64 ^>= 0.4.2,
     bytestring ^>= 0.11.3 || ^>= 0.12.0,
     case-insensitive ^>= 1.2.1,
