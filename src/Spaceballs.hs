@@ -108,56 +108,57 @@ instance Show Respond where
 ------------------------------------------------------------------------------------------------------------------------
 -- Router
 
-data Router = Router
-  { resource :: !Resource,
-    children :: !(Mapping Text Router)
+data Router a = Router
+  { resource :: !(Resource a),
+    children :: !(Mapping Text (Router a))
   }
 
 -- A lot of ugly code here just to get a `Router` that doesn't have a user-visible `Semigroup` instance... heh.
 -- There's no harm in the instance, it just seems cleaner to give the user only one way to do things (namely, to
 -- define each router as an element in a list, and not be able to <> them together).
-newtype RouterWithSemigroup
-  = RouterWithSemigroup Router
+newtype RouterWithSemigroup a
+  = RouterWithSemigroup (Router a)
 
-instance Semigroup RouterWithSemigroup where
-  (<>) :: RouterWithSemigroup -> RouterWithSemigroup -> RouterWithSemigroup
-  (<>) = coerce appendRouters
+instance Semigroup (RouterWithSemigroup a) where
+  (<>) :: RouterWithSemigroup a -> RouterWithSemigroup a -> RouterWithSemigroup a
+  RouterWithSemigroup x <> RouterWithSemigroup y =
+    RouterWithSemigroup (appendRouters x y)
 
-emptyRouter :: Router
+emptyRouter :: Router a
 emptyRouter =
   Router emptyResource EmptyMapping
 
-appendRouters :: Router -> Router -> Router
+appendRouters :: forall a. Router a -> Router a -> Router a
 appendRouters x y =
   Router
     (x.resource <> y.resource)
     ( coerce
-        @(Mapping Text RouterWithSemigroup)
-        @(Mapping Text Router)
-        ( coerce @(Mapping Text Router) @(Mapping Text RouterWithSemigroup) x.children
-            <> coerce @(Mapping Text Router) @(Mapping Text RouterWithSemigroup) y.children
+        @(Mapping Text (RouterWithSemigroup a))
+        @(Mapping Text (Router a))
+        ( coerce @(Mapping Text (Router a)) @(Mapping Text (RouterWithSemigroup a)) x.children
+            <> coerce @(Mapping Text (Router a)) @(Mapping Text (RouterWithSemigroup a)) y.children
         )
     )
 
-concatRouters :: [Router] -> Router
+concatRouters :: forall a. [Router a] -> Router a
 concatRouters =
   coerce
-    @([RouterWithSemigroup] -> RouterWithSemigroup)
-    @([Router] -> Router)
+    @([RouterWithSemigroup a] -> RouterWithSemigroup a)
+    @([Router a] -> Router a)
     concatRoutersWithSemigroup
 
-concatRoutersWithSemigroup :: [RouterWithSemigroup] -> RouterWithSemigroup
+concatRoutersWithSemigroup :: [RouterWithSemigroup a] -> RouterWithSemigroup a
 concatRoutersWithSemigroup = \case
   [] -> RouterWithSemigroup emptyRouter
   x : xs ->
     x <> foldr (<>) (RouterWithSemigroup emptyRouter) xs
 
 -- | Route a request to a resource.
-route :: [Router] -> [Text] -> Maybe Resource
+route :: [Router a] -> [Text] -> Maybe (Resource a)
 route =
   route1 . concatRouters
 
-route1 :: Router -> [Text] -> Maybe Resource
+route1 :: Router a -> [Text] -> Maybe (Resource a)
 route1 router = \case
   [] -> Just router.resource
   segment_ : segments -> do
@@ -165,7 +166,7 @@ route1 router = \case
     route1 router1 segments
 
 -- | Act upon a resource.
-act :: Resource -> Http.Method -> Maybe (Text -> Params -> Headers -> ByteString -> IO Void)
+act :: Resource a -> Http.Method -> Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)
 act resource method
   | method == Http.methodGet = resource.get
   | method == Http.methodPost = resource.post
@@ -175,49 +176,49 @@ act resource method
   | otherwise = Nothing
 
 -- | @DELETE@ a resource.
-delete :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
+delete :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
 delete handler =
   emptyRouter
     { resource = emptyResource {delete = Just handler}
     }
 
 -- | @GET@ a resource.
-get :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
+get :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
 get handler =
   emptyRouter
     { resource = emptyResource {get = Just handler}
     }
 
 -- | @PATCH@ a resource.
-patch :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
+patch :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
 patch handler =
   emptyRouter
     { resource = emptyResource {patch = Just handler}
     }
 
 -- | @POST@ a resource.
-post :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
+post :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
 post handler =
   emptyRouter
     { resource = emptyResource {post = Just handler}
     }
 
 -- | @PUT@ a resource.
-put :: (Text -> Params -> Headers -> ByteString -> IO Void) -> Router
+put :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
 put handler =
   emptyRouter
     { resource = emptyResource {put = Just handler}
     }
 
 -- | Capture a path segment.
-capture :: (Text -> [Router]) -> Router
+capture :: (Text -> [Router a]) -> Router a
 capture f =
   emptyRouter
     { children = TotalMapping (concatRouters . f)
     }
 
 -- | Match a path segment.
-segment :: Text -> [Router] -> Router
+segment :: Text -> [Router a] -> Router a
 segment name router =
   emptyRouter
     { children = PartialMapping (Map.singleton name (concatRouters router))
@@ -253,20 +254,20 @@ runMapping = \case
 -- Handlers
 
 -- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
-data Resource = Resource
-  { delete :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void)),
-    get :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void)),
-    patch :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void)),
-    post :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void)),
-    put :: !(Maybe (Text -> Params -> Headers -> ByteString -> IO Void))
+data Resource a = Resource
+  { delete :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)),
+    get :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)),
+    patch :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)),
+    post :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)),
+    put :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void))
   }
 
 -- Left-biased
-instance Semigroup Resource where
+instance Semigroup (Resource a) where
   Resource a1 b1 c1 d1 e1 <> Resource a2 b2 c2 d2 e2 =
     Resource (a1 <|> a2) (b1 <|> b2) (c1 <|> c2) (d1 <|> d2) (e1 <|> e2)
 
-emptyResource :: Resource
+emptyResource :: Resource a
 emptyResource =
   Resource Nothing Nothing Nothing Nothing Nothing
 
