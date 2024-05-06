@@ -56,6 +56,7 @@ where
 
 import Control.Applicative (Alternative (..))
 import Control.Exception (Exception (..), asyncExceptionFromException, asyncExceptionToException, throwIO, try)
+import Data.Base64.Types (extractBase64)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64.URL qualified as Base64.Url
@@ -286,13 +287,13 @@ data Request = Request
 
 makeRequest :: Wai.Request -> IO Request
 makeRequest request = do
-  id <- Base64.Url.encodeBase64Unpadded <$> Random.uniformByteStringM 16 Random.globalStdGen
-  body <- LazyByteString.toStrict <$> Wai.consumeRequestBodyStrict request
+  id <- Random.uniformByteStringM 16 Random.globalStdGen
+  body <- Wai.consumeRequestBodyStrict request
   pure
     Request
-      { body,
+      { body = LazyByteString.toStrict body,
         headers = buildHeaders (addWaiHeaders (Wai.requestHeaders request)),
-        id,
+        id = extractBase64 (Base64.Url.encodeBase64Unpadded id),
         method = Wai.requestMethod request,
         params = makeParams (Wai.queryString request),
         path = Wai.pathInfo request
