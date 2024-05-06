@@ -56,10 +56,8 @@ where
 
 import Control.Applicative (Alternative (..))
 import Control.Exception (Exception (..), asyncExceptionFromException, asyncExceptionToException, throwIO, try)
-import Data.Base64.Types (extractBase64)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
-import Data.ByteString.Base64.URL qualified as Base64.Url
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Coerce (coerce)
 import Data.Kind (Type)
@@ -78,7 +76,6 @@ import Network.HTTP.Types qualified as Http
 import Network.HTTP.Types.Status qualified as Http
 import Network.Wai qualified as Wai
 import Spaceballs.Headers (Headers, HeadersBuilder, addHeader, addWaiHeaders, buildHeaders, emptyHeaders, emptyHeadersBuilder, foldHeaders, foldlHeaders, getHeader, headersToWaiHeaders)
-import System.Random.Stateful qualified as Random
 import Unsafe.Coerce (unsafeCoerce)
 import Prelude hiding (id)
 
@@ -104,7 +101,7 @@ instance Exception Respond where
   toException = asyncExceptionToException
 
 instance Show Respond where
-  show _ = "Respond"
+  show _ = "«internal exception»"
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Router
@@ -167,7 +164,7 @@ route1 router = \case
     route1 router1 segments
 
 -- | Act upon a resource.
-act :: Resource a -> Http.Method -> Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)
+act :: Resource a -> Http.Method -> Maybe (a -> Params -> Headers -> ByteString -> IO Void)
 act resource method
   | method == Http.methodGet = resource.get
   | method == Http.methodPost = resource.post
@@ -177,35 +174,35 @@ act resource method
   | otherwise = Nothing
 
 -- | @DELETE@ a resource.
-delete :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
+delete :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
 delete handler =
   emptyRouter
     { resource = emptyResource {delete = Just handler}
     }
 
 -- | @GET@ a resource.
-get :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
+get :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
 get handler =
   emptyRouter
     { resource = emptyResource {get = Just handler}
     }
 
 -- | @PATCH@ a resource.
-patch :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
+patch :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
 patch handler =
   emptyRouter
     { resource = emptyResource {patch = Just handler}
     }
 
 -- | @POST@ a resource.
-post :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
+post :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
 post handler =
   emptyRouter
     { resource = emptyResource {post = Just handler}
     }
 
 -- | @PUT@ a resource.
-put :: (a -> Text -> Params -> Headers -> ByteString -> IO Void) -> Router a
+put :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
 put handler =
   emptyRouter
     { resource = emptyResource {put = Just handler}
@@ -256,11 +253,11 @@ runMapping = \case
 
 -- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
 data Resource a = Resource
-  { delete :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)),
-    get :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)),
-    patch :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)),
-    post :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void)),
-    put :: !(Maybe (a -> Text -> Params -> Headers -> ByteString -> IO Void))
+  { delete :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void)),
+    get :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void)),
+    patch :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void)),
+    post :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void)),
+    put :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void))
   }
 
 -- Left-biased
@@ -278,7 +275,6 @@ emptyResource =
 data Request = Request
   { body :: !ByteString,
     headers :: !Headers,
-    id :: !Text,
     method :: !Http.Method,
     params :: !Params,
     path :: ![Text]
@@ -287,13 +283,11 @@ data Request = Request
 
 makeRequest :: Wai.Request -> IO Request
 makeRequest request = do
-  id <- Random.uniformByteStringM 16 Random.globalStdGen
   body <- Wai.consumeRequestBodyStrict request
   pure
     Request
       { body = LazyByteString.toStrict body,
         headers = buildHeaders (addWaiHeaders (Wai.requestHeaders request)),
-        id = extractBase64 (Base64.Url.encodeBase64Unpadded id),
         method = Wai.requestMethod request,
         params = makeParams (Wai.queryString request),
         path = Wai.pathInfo request
