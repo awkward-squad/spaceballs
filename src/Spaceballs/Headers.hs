@@ -3,7 +3,7 @@ module Spaceballs.Headers
     Headers (..),
     emptyHeaders,
     getHeader,
-    foldHeaders,
+    foldMapHeaders,
     foldlHeaders,
     headersToWaiHeaders,
 
@@ -59,12 +59,12 @@ getHeader name (Headers headers) =
     len =
       sizeofArray headers
 
--- | Fold headers (strict, left-associated).
-foldHeaders :: (Monoid m) => (Text -> Text -> m) -> Headers -> m
-foldHeaders f =
+-- | Fold headers (left associated).
+foldMapHeaders :: (Monoid m) => (Text -> Text -> m) -> Headers -> m
+foldMapHeaders f =
   foldlHeaders (\acc name value -> acc <> f name value) mempty
 
--- | Strict left-fold headers.
+-- | Left-fold headers.
 foldlHeaders :: (a -> Text -> Text -> a) -> a -> Headers -> a
 foldlHeaders f z (Headers headers) =
   go z 0

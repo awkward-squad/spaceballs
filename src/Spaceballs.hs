@@ -4,18 +4,19 @@ module Spaceballs
 
     -- * Router
     Router,
-    Resource,
-    route,
-    act,
+    router,
+    on404,
+    on405,
 
-    -- ** Resources
+    -- * Handler
+    Handler,
     delete,
     get,
     patch,
     post,
     put,
 
-    -- ** Children
+    -- ** Route capture
     capture,
     segment,
 
@@ -43,7 +44,7 @@ module Spaceballs
     -- * Headers
     Headers,
     getHeader,
-    foldHeaders,
+    foldMapHeaders,
     foldlHeaders,
 
     -- ** Headers builder
@@ -75,7 +76,19 @@ import GHC.Generics (Generic)
 import Network.HTTP.Types qualified as Http
 import Network.HTTP.Types.Status qualified as Http
 import Network.Wai qualified as Wai
-import Spaceballs.Headers (Headers, HeadersBuilder, addHeader, addWaiHeaders, buildHeaders, emptyHeaders, emptyHeadersBuilder, foldHeaders, foldlHeaders, getHeader, headersToWaiHeaders)
+import Spaceballs.Headers
+  ( Headers,
+    HeadersBuilder,
+    addHeader,
+    addWaiHeaders,
+    buildHeaders,
+    emptyHeaders,
+    emptyHeadersBuilder,
+    foldMapHeaders,
+    foldlHeaders,
+    getHeader,
+    headersToWaiHeaders,
+  )
 import Unsafe.Coerce (unsafeCoerce)
 import Prelude hiding (id)
 
@@ -83,10 +96,10 @@ import Prelude hiding (id)
 -- Application
 
 -- | Make a WAI application.
-application :: (Request -> IO Void) -> Wai.Application
-application app request0 respond_ = do
+application :: Router a -> a -> Wai.Application
+application router_ env request0 respond_ = do
   request <- makeRequest request0
-  try (app request) >>= \case
+  try (applyRouter router_ env request) >>= \case
     Left exception
       | Just (Respond response_) <- fromException @Respond exception -> respond_ response_
       | otherwise -> throwIO exception
@@ -107,119 +120,146 @@ instance Show Respond where
 -- Router
 
 data Router a = Router
-  { resource :: !(Resource a),
-    children :: !(Mapping Text (Router a))
+  { routerRoutes :: [Handler a],
+    routerOn404 :: a -> Request -> IO Void,
+    routerOn405 :: a -> Request -> IO Void
   }
 
--- A lot of ugly code here just to get a `Router` that doesn't have a user-visible `Semigroup` instance... heh.
--- There's no harm in the instance, it just seems cleaner to give the user only one way to do things (namely, to
--- define each router as an element in a list, and not be able to <> them together).
-newtype RouterWithSemigroup a
-  = RouterWithSemigroup (Router a)
-
-instance Semigroup (RouterWithSemigroup a) where
-  (<>) :: RouterWithSemigroup a -> RouterWithSemigroup a -> RouterWithSemigroup a
-  RouterWithSemigroup x <> RouterWithSemigroup y =
-    RouterWithSemigroup (appendRouters x y)
-
-emptyRouter :: Router a
-emptyRouter =
-  Router emptyResource EmptyMapping
-
-appendRouters :: forall a. Router a -> Router a -> Router a
-appendRouters x y =
+-- | Make a router from a collection of routes.
+router :: [Handler a] -> Router a
+router routes =
   Router
-    (x.resource <> y.resource)
-    ( coerce
-        @(Mapping Text (RouterWithSemigroup a))
-        @(Mapping Text (Router a))
-        ( coerce @(Mapping Text (Router a)) @(Mapping Text (RouterWithSemigroup a)) x.children
-            <> coerce @(Mapping Text (Router a)) @(Mapping Text (RouterWithSemigroup a)) y.children
-        )
-    )
+    { routerRoutes = routes,
+      routerOn404 = \_ _ -> respond (response 404),
+      routerOn405 = \_ _ -> respond (response 405)
+    }
 
-concatRouters :: forall a. [Router a] -> Router a
-concatRouters =
-  coerce
-    @([RouterWithSemigroup a] -> RouterWithSemigroup a)
-    @([Router a] -> Router a)
-    concatRoutersWithSemigroup
+-- | Set the @404 Not Found@ handler.
+on404 :: (a -> Request -> IO Void) -> Router a -> Router a
+on404 handler router_ =
+  router_ {routerOn404 = handler}
 
-concatRoutersWithSemigroup :: [RouterWithSemigroup a] -> RouterWithSemigroup a
-concatRoutersWithSemigroup = \case
-  [] -> RouterWithSemigroup emptyRouter
-  x : xs ->
-    x <> foldr (<>) (RouterWithSemigroup emptyRouter) xs
+-- | Set the @405 Method Not Allowed@ handler.
+on405 :: (a -> Request -> IO Void) -> Router a -> Router a
+on405 handler router_ =
+  router_ {routerOn405 = handler}
 
 -- | Route a request to a resource.
-route :: [Router a] -> [Text] -> Maybe (Resource a)
-route =
-  route1 . concatRouters
+applyRouter :: Router a -> a -> Request -> IO Void
+applyRouter router2 = \env request ->
+  case routePath request.path of
+    Nothing -> router2.routerOn404 env request
+    Just resource ->
+      case applyPathHandlers resource request.method of
+        Nothing -> router2.routerOn405 env request
+        Just handler -> handler env request
+  where
+    routePath =
+      applyHandler (concatHandlers router2.routerRoutes)
 
-route1 :: Router a -> [Text] -> Maybe (Resource a)
-route1 router = \case
-  [] -> Just router.resource
+------------------------------------------------------------------------------------------------------------------------
+-- Handler
+
+-- | A handler.
+data Handler a = Handler
+  { here :: !(PathHandlers a),
+    there :: !(Mapping Text (Handler a))
+  }
+
+-- A lot of ugly code here just to get a `Handler` that doesn't have a user-visible `Semigroup` instance... heh.
+-- There's no harm in the instance, it just seems cleaner to give the user only one way to do things (namely, to
+-- define each handler as an element in a list, and not be able to <> them together).
+newtype Handler' a
+  = Handler' (Handler a)
+
+instance Semigroup (Handler' a) where
+  (<>) :: Handler' a -> Handler' a -> Handler' a
+  Handler' x <> Handler' y =
+    Handler' (appendHandlers x y)
+
+emptyHandler :: Handler a
+emptyHandler =
+  Handler emptyPathHandlers EmptyMapping
+
+emptyHandler' :: Handler' a
+emptyHandler' =
+  Handler' emptyHandler
+
+appendHandlers :: forall a. Handler a -> Handler a -> Handler a
+appendHandlers x y =
+  Handler
+    { here = x.here <> y.here,
+      there = untick (tick x.there <> tick y.there)
+    }
+  where
+    tick = coerce @(Mapping Text (Handler a)) @(Mapping Text (Handler' a))
+    untick = coerce @(Mapping Text (Handler' a)) @(Mapping Text (Handler a))
+    {-# INLINE tick #-}
+    {-# INLINE untick #-}
+
+concatHandlers :: forall a. [Handler a] -> Handler a
+concatHandlers =
+  coerce @([Handler' a] -> Handler' a) @([Handler a] -> Handler a) concatHandlers'
+
+concatHandlers' :: [Handler' a] -> Handler' a
+concatHandlers' = \case
+  [] -> emptyHandler'
+  x : xs -> x <> foldr (<>) emptyHandler' xs
+
+applyHandler :: Handler a -> [Text] -> Maybe (PathHandlers a)
+applyHandler router_ = \case
+  [] -> Just router_.here
   segment_ : segments -> do
-    router1 <- runMapping router.children segment_
-    route1 router1 segments
+    router1 <- runMapping router_.there segment_
+    applyHandler router1 segments
 
--- | Act upon a resource.
-act :: Resource a -> Http.Method -> Maybe (a -> Params -> Headers -> ByteString -> IO Void)
-act resource method
-  | method == Http.methodGet = resource.get
-  | method == Http.methodPost = resource.post
-  | method == Http.methodPut = resource.put
-  | method == Http.methodDelete = resource.delete
-  | method == Http.methodPatch = resource.patch
-  | otherwise = Nothing
-
--- | @DELETE@ a resource.
-delete :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
+-- | Handle a @DELETE@ request.
+delete :: (a -> Request -> IO Void) -> Handler a
 delete handler =
-  emptyRouter
-    { resource = emptyResource {delete = Just handler}
+  emptyHandler
+    { here = emptyPathHandlers {delete = Just handler}
     }
 
--- | @GET@ a resource.
-get :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
+-- | Handle a @GET@ request.
+get :: (a -> Request -> IO Void) -> Handler a
 get handler =
-  emptyRouter
-    { resource = emptyResource {get = Just handler}
+  emptyHandler
+    { here = emptyPathHandlers {get = Just handler}
     }
 
--- | @PATCH@ a resource.
-patch :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
+-- | Handle a @PATCH@ request.
+patch :: (a -> Request -> IO Void) -> Handler a
 patch handler =
-  emptyRouter
-    { resource = emptyResource {patch = Just handler}
+  emptyHandler
+    { here = emptyPathHandlers {patch = Just handler}
     }
 
--- | @POST@ a resource.
-post :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
+-- | Handle a @POST@ request.
+post :: (a -> Request -> IO Void) -> Handler a
 post handler =
-  emptyRouter
-    { resource = emptyResource {post = Just handler}
+  emptyHandler
+    { here = emptyPathHandlers {post = Just handler}
     }
 
--- | @PUT@ a resource.
-put :: (a -> Params -> Headers -> ByteString -> IO Void) -> Router a
+-- | Handle a @PUT@ request.
+put :: (a -> Request -> IO Void) -> Handler a
 put handler =
-  emptyRouter
-    { resource = emptyResource {put = Just handler}
+  emptyHandler
+    { here = emptyPathHandlers {put = Just handler}
     }
 
 -- | Capture a path segment.
-capture :: (Text -> [Router a]) -> Router a
+capture :: (Text -> [Handler a]) -> Handler a
 capture f =
-  emptyRouter
-    { children = TotalMapping (concatRouters . f)
+  emptyHandler
+    { there = TotalMapping (concatHandlers . f)
     }
 
 -- | Match a path segment.
-segment :: Text -> [Router a] -> Router a
-segment name router =
-  emptyRouter
-    { children = PartialMapping (Map.singleton name (concatRouters router))
+segment :: Text -> [Handler a] -> Handler a
+segment name router_ =
+  emptyHandler
+    { there = PartialMapping (Map.singleton name (concatHandlers router_))
     }
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -249,25 +289,34 @@ runMapping = \case
   TotalMappingWithOverrides m f -> Just . \x -> fromMaybe (f x) (Map.lookup x m)
 
 ------------------------------------------------------------------------------------------------------------------------
--- Handlers
+-- Path handlers
 
 -- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
-data Resource a = Resource
-  { delete :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void)),
-    get :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void)),
-    patch :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void)),
-    post :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void)),
-    put :: !(Maybe (a -> Params -> Headers -> ByteString -> IO Void))
+data PathHandlers a = PathHandlers
+  { delete :: !(Maybe (a -> Request -> IO Void)),
+    get :: !(Maybe (a -> Request -> IO Void)),
+    patch :: !(Maybe (a -> Request -> IO Void)),
+    post :: !(Maybe (a -> Request -> IO Void)),
+    put :: !(Maybe (a -> Request -> IO Void))
   }
 
 -- Left-biased
-instance Semigroup (Resource a) where
-  Resource a1 b1 c1 d1 e1 <> Resource a2 b2 c2 d2 e2 =
-    Resource (a1 <|> a2) (b1 <|> b2) (c1 <|> c2) (d1 <|> d2) (e1 <|> e2)
+instance Semigroup (PathHandlers a) where
+  PathHandlers a1 b1 c1 d1 e1 <> PathHandlers a2 b2 c2 d2 e2 =
+    PathHandlers (a1 <|> a2) (b1 <|> b2) (c1 <|> c2) (d1 <|> d2) (e1 <|> e2)
 
-emptyResource :: Resource a
-emptyResource =
-  Resource Nothing Nothing Nothing Nothing Nothing
+emptyPathHandlers :: PathHandlers a
+emptyPathHandlers =
+  PathHandlers Nothing Nothing Nothing Nothing Nothing
+
+applyPathHandlers :: PathHandlers a -> Http.Method -> Maybe (a -> Request -> IO Void)
+applyPathHandlers handlers method
+  | method == Http.methodGet = handlers.get
+  | method == Http.methodPost = handlers.post
+  | method == Http.methodPut = handlers.put
+  | method == Http.methodDelete = handlers.delete
+  | method == Http.methodPatch = handlers.patch
+  | otherwise = Nothing
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Request
@@ -418,6 +467,7 @@ data Response = Response
     headers :: !Headers,
     status :: {-# UNPACK #-} !Int
   }
+  deriving stock (Eq, Generic)
 
 response :: Int -> Response
 response status =
