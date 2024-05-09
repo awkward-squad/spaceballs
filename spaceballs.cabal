@@ -45,5 +45,8 @@ library
   if impl(ghc >= 9.2)
     ghc-options:
       -Wno-missing-kind-signatures
+  if impl(ghc >= 9.8)
+    ghc-options:
+      -Wno-missing-role-annotations
   other-modules:
     Spaceballs.Headers

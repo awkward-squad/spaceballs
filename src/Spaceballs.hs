@@ -44,14 +44,16 @@ module Spaceballs
     -- * Headers
     Headers,
     getHeader,
+    headersToList,
+    headersToMap,
     foldMapHeaders,
     foldlHeaders,
+    foldrHeaders,
 
     -- ** Headers builder
     HeadersBuilder,
-    emptyHeadersBuilder,
-    addHeader,
-    buildHeaders,
+    header,
+    headers,
   )
 where
 
@@ -79,15 +81,17 @@ import Network.Wai qualified as Wai
 import Spaceballs.Headers
   ( Headers,
     HeadersBuilder,
-    addHeader,
-    addWaiHeaders,
-    buildHeaders,
     emptyHeaders,
-    emptyHeadersBuilder,
     foldMapHeaders,
     foldlHeaders,
+    foldrHeaders,
     getHeader,
+    header,
+    headers,
+    headersToList,
+    headersToMap,
     headersToWaiHeaders,
+    waiHeaders,
   )
 import Unsafe.Coerce (unsafeCoerce)
 import Prelude hiding (id)
@@ -336,7 +340,7 @@ makeRequest request = do
   pure
     Request
       { body = LazyByteString.toStrict body,
-        headers = buildHeaders (addWaiHeaders (Wai.requestHeaders request)),
+        headers = headers (waiHeaders (Wai.requestHeaders request)),
         method = Wai.requestMethod request,
         params = makeParams (Wai.queryString request),
         path = Wai.pathInfo request
@@ -478,10 +482,10 @@ response status =
     }
 
 setHeaders :: Headers -> Response -> Response
-setHeaders headers response_ =
+setHeaders hdrs response_ =
   Response
     { body = response_.body,
-      headers = headers,
+      headers = hdrs,
       status = response_.status
     }
 

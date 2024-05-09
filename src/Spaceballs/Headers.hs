@@ -3,16 +3,18 @@ module Spaceballs.Headers
     Headers (..),
     emptyHeaders,
     getHeader,
+    headersToList,
+    headersToMap,
     foldMapHeaders,
     foldlHeaders,
+    foldrHeaders,
     headersToWaiHeaders,
 
     -- * Headers builder
     HeadersBuilder,
-    emptyHeadersBuilder,
-    addHeader,
-    addWaiHeaders,
-    buildHeaders,
+    header,
+    headers,
+    waiHeaders,
 
     -- * Header
     Header (..),
@@ -44,7 +46,7 @@ emptyHeaders =
 -- > >>> getHeader "content-type" headers
 -- > Just "image/png"
 getHeader :: Text -> Headers -> Maybe Text
-getHeader name (Headers headers) =
+getHeader name (Headers hdrs) =
   go 0
   where
     go :: Int -> Maybe Text
@@ -53,11 +55,21 @@ getHeader name (Headers headers) =
       | name == name1 = Just value
       | otherwise = go (i + 1)
       where
-        Header name1 value = indexArray headers i
+        Header name1 value = indexArray hdrs i
 
     len :: Int
     len =
-      sizeofArray headers
+      sizeofArray hdrs
+
+-- | Convert headers to a list.
+headersToList :: Headers -> [(Text, Text)]
+headersToList =
+  foldrHeaders (\key value -> ((key, value) :)) []
+
+-- | Convert headers to a map.
+headersToMap :: Headers -> Map Text Text
+headersToMap =
+  foldlHeaders (\acc key value -> Map.insert key value acc) Map.empty
 
 -- | Fold headers (left associated).
 foldMapHeaders :: (Monoid m) => (Text -> Text -> m) -> Headers -> m
@@ -66,18 +78,33 @@ foldMapHeaders f =
 
 -- | Left-fold headers.
 foldlHeaders :: (a -> Text -> Text -> a) -> a -> Headers -> a
-foldlHeaders f z (Headers headers) =
+foldlHeaders f z (Headers hdrs) =
   go z 0
   where
     go !acc !i
       | i == len = acc
       | otherwise = go (f acc name value) (i + 1)
       where
-        Header name value = indexArray headers i
+        Header name value = indexArray hdrs i
 
     len :: Int
     len =
-      sizeofArray headers
+      sizeofArray hdrs
+
+-- | Right-fold headers.
+foldrHeaders :: (Text -> Text -> a -> a) -> a -> Headers -> a
+foldrHeaders f z (Headers hdrs) =
+  go z (len - 1)
+  where
+    go !acc !i
+      | i == -1 = acc
+      | otherwise = go (f name value acc) (i - 1)
+      where
+        Header name value = indexArray hdrs i
+
+    len :: Int
+    len =
+      sizeofArray hdrs
 
 headersToWaiHeaders :: Headers -> [(CaseInsensitive.CI ByteString, ByteString)]
 headersToWaiHeaders =
@@ -93,54 +120,47 @@ headersToWaiHeaders =
 -- Headers builder
 
 newtype HeadersBuilder
-  = HeadersBuilder (Map Text Text)
+  = HeadersBuilder (Map Text Text -> Map Text Text)
 
 instance Monoid HeadersBuilder where
   mempty =
-    emptyHeadersBuilder
+    HeadersBuilder id
 
 instance Semigroup HeadersBuilder where
-  HeadersBuilder xs <> HeadersBuilder ys =
-    HeadersBuilder (Map.unionWith (\x y -> x <> ", " <> y) xs ys)
+  HeadersBuilder f <> HeadersBuilder g =
+    HeadersBuilder (g . f)
 
-emptyHeadersBuilder :: HeadersBuilder
-emptyHeadersBuilder =
-  HeadersBuilder Map.empty
+header :: Text -> Text -> HeadersBuilder
+header =
+  coerce header_
 
-addHeader :: Text -> Text -> HeadersBuilder -> HeadersBuilder
-addHeader =
-  coerce addHeader_
-
-addHeader_ :: Text -> Text -> Map Text Text -> Map Text Text
-addHeader_ name value =
+header_ :: Text -> Text -> Map Text Text -> Map Text Text
+header_ name value =
   Map.alter f name
   where
     f = \case
       Nothing -> Just value
       Just value1 -> Just (value1 <> ", " <> value)
 
-addWaiHeaders :: [(CaseInsensitive.CI ByteString, ByteString)] -> HeadersBuilder
-addWaiHeaders =
-  List.foldl' step emptyHeadersBuilder
+waiHeaders :: [(CaseInsensitive.CI ByteString, ByteString)] -> HeadersBuilder
+waiHeaders =
+  List.foldl' step mempty
   where
     step :: HeadersBuilder -> (CaseInsensitive.CI ByteString, ByteString) -> HeadersBuilder
-    step (HeadersBuilder acc) (name, value0) =
-      HeadersBuilder (Map.alter f (Text.decodeASCII (CaseInsensitive.foldedCase name)) acc)
-      where
-        f = \case
-          Nothing -> Just value1
-          Just value2 -> Just (value2 <> ", " <> value1)
-        value1 = Text.decodeUtf8 value0
+    step acc (name, value) =
+      acc <> header (Text.decodeASCII (CaseInsensitive.foldedCase name)) (Text.decodeUtf8 value)
 
-buildHeaders :: HeadersBuilder -> Headers
-buildHeaders =
-  coerce buildHeaders_
+headers :: HeadersBuilder -> Headers
+headers =
+  coerce headers_
 
-buildHeaders_ :: Map Text Text -> Array Header
-buildHeaders_ headers =
-  createArray (Map.size headers) undefined \array -> do
-    ifor_ (Map.toList headers) \i (name, value) ->
+headers_ :: (Map Text Text -> Map Text Text) -> Array Header
+headers_ f =
+  createArray (Map.size hdrs) undefined \array -> do
+    ifor_ (Map.toList hdrs) \i (name, value) ->
       writeArray array i (Header name value)
+  where
+    hdrs = f Map.empty
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Header
