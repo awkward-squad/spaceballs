@@ -25,10 +25,9 @@ module Spaceballs
     Params,
 
     -- ** Query params
-    Param,
-    ptext,
     param,
     params,
+    paramsToMap,
 
     -- * Response
 
@@ -63,6 +62,8 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Coerce (coerce)
+import Data.IntMap.Strict (IntMap)
+import Data.IntMap.Strict qualified as IntMap
 import Data.Kind (Type)
 import Data.List qualified as List
 import Data.Map (Map)
@@ -350,20 +351,24 @@ makeRequest request = do
 -- Params
 
 newtype Params
-  = Params (Map Text (P Array 'True))
+  = Params (Map Text (P Array 'SingleOrList))
   deriving stock (Eq)
 
-data P :: (Type -> Type) -> Bool -> Type where
+data ParamType
+  = DefinitelySingle
+  | SingleOrList
+
+data P :: (Type -> Type) -> ParamType -> Type where
   SingleParam :: !Text -> P f a
-  ListOfParams :: !(f (P f 'False)) -> P f 'True
+  ListOfParams :: !(f (P f 'DefinitelySingle)) -> P f 'SingleOrList
 
 deriving stock instance (forall x. (Eq x) => Eq (f x)) => (Eq (P f a))
 
-coercePs :: [P f 'False] -> [P g b]
+coercePs :: [P f 'DefinitelySingle] -> [P g b]
 coercePs = unsafeCoerce
 {-# INLINE coercePs #-}
 
-singleParam :: P f 'False -> Text
+singleParam :: P f 'DefinitelySingle -> Text
 singleParam = \case
   SingleParam s -> s
 
@@ -371,15 +376,15 @@ makeParams :: [(ByteString, Maybe ByteString)] -> Params
 makeParams =
   coerce finalize . go
   where
-    go :: [(ByteString, Maybe ByteString)] -> Map Text (P [] 'True)
+    go :: [(ByteString, Maybe ByteString)] -> Map Text (P [] 'SingleOrList)
     go =
       List.foldl' f Map.empty
       where
-        f :: Map Text (P [] 'True) -> (ByteString, Maybe ByteString) -> Map Text (P [] 'True)
+        f :: Map Text (P [] 'SingleOrList) -> (ByteString, Maybe ByteString) -> Map Text (P [] 'SingleOrList)
         f acc (k, mv) =
           Map.alter g (Text.decodeUtf8 k) acc
           where
-            g :: Maybe (P [] 'True) -> Maybe (P [] 'True)
+            g :: Maybe (P [] 'SingleOrList) -> Maybe (P [] 'SingleOrList)
             g =
               Just . \case
                 Nothing -> v
@@ -390,11 +395,11 @@ makeParams =
             v =
               SingleParam (maybe Text.empty Text.decodeUtf8 mv)
 
-    finalize :: Map Text (P [] 'True) -> Map Text (P Array 'True)
+    finalize :: Map Text (P [] 'SingleOrList) -> Map Text (P Array 'SingleOrList)
     finalize ps =
       Map.map f ps
       where
-        f :: P [] 'True -> P Array 'True
+        f :: P [] 'SingleOrList -> P Array 'SingleOrList
         f = \case
           SingleParam x -> SingleParam x
           ListOfParams xs -> ListOfParams (Array.arrayFromList (coercePs (reverse xs)))
@@ -411,57 +416,30 @@ firstParam = \case
   SingleParam s -> s
   ListOfParams ss -> singleParam (Array.indexArray ss 0)
 
-lookupParam :: Text -> Params -> Maybe (P Array 'True)
+lookupParam :: Text -> Params -> Maybe (P Array 'SingleOrList)
 lookupParam =
-  coerce @(Text -> Map Text (P Array 'True) -> Maybe (P Array 'True)) Map.lookup
+  coerce @(Text -> Map Text (P Array 'SingleOrList) -> Maybe (P Array 'SingleOrList)) Map.lookup
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Query params
 
--- | A query parameter parser.
-newtype Param a
-  = Param (Text -> Maybe a)
-  deriving stock (Functor)
-
-instance Alternative Param where
-  empty = Param \_ -> Nothing
-  Param x <|> Param y = Param \s -> x s <|> y s
-
-instance Applicative Param where
-  pure x = Param \_ -> Just x
-  Param x <*> Param y = Param \s -> x s <*> y s
-
-ptext :: Param Text
-ptext =
-  Param Just
-
--- | Get an optional parameter from the request.
+-- | Get an optional parameter.
 --
 -- If multiple parameters with the given name exist, this function returns the first.
-param :: Request -> Text -> Param a -> IO (Maybe a)
-param request name (Param parser) = do
-  case lookupParam name request.params of
-    Nothing -> pure Nothing
-    Just p ->
-      case parser (firstParam p) of
-        Nothing -> respondBadParameter
-        Just result -> pure (Just result)
+param :: Params -> Text -> Maybe Text
+param ps name = do
+  firstParam <$> lookupParam name ps
 
--- | Get an optional parameter from the request.
+-- | Get an optional parameter.
 --
 -- If multiple parameters with the given name exist, this function returns them all.
-params :: Request -> Text -> Param a -> IO (Array a)
-params request name (Param parser) =
-  case lookupParam name request.params of
-    Nothing -> pure Array.emptyArray
-    Just p ->
-      case traverse parser (allParams p) of
-        Nothing -> respondBadParameter
-        Just result -> pure result
+params :: Params -> Text -> Array Text
+params ps name =
+  maybe (mempty @(Array Text)) allParams (lookupParam name ps)
 
-respondBadParameter :: IO void
-respondBadParameter =
-  respondWai (Wai.responseBuilder Http.status400 [] mempty)
+paramsToMap :: Params -> Map Text (Array Text)
+paramsToMap =
+  coerce (Map.map allParams)
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Response
@@ -514,53 +492,58 @@ respondWai =
   throwIO . Respond
 
 intToStatus :: Int -> Http.Status
-intToStatus = \case
-  100 -> Http.status100
-  101 -> Http.status101
-  200 -> Http.status200
-  201 -> Http.status201
-  202 -> Http.status202
-  203 -> Http.status203
-  204 -> Http.status204
-  205 -> Http.status205
-  206 -> Http.status206
-  300 -> Http.status300
-  301 -> Http.status301
-  302 -> Http.status302
-  303 -> Http.status303
-  304 -> Http.status304
-  305 -> Http.status305
-  307 -> Http.status307
-  308 -> Http.status308
-  400 -> Http.status400
-  401 -> Http.status401
-  402 -> Http.status402
-  403 -> Http.status403
-  404 -> Http.status404
-  405 -> Http.status405
-  406 -> Http.status406
-  407 -> Http.status407
-  408 -> Http.status408
-  409 -> Http.status409
-  410 -> Http.status410
-  411 -> Http.status411
-  412 -> Http.status412
-  413 -> Http.status413
-  414 -> Http.status414
-  415 -> Http.status415
-  416 -> Http.status416
-  417 -> Http.status417
-  418 -> Http.status418
-  422 -> Http.status422
-  426 -> Http.status426
-  428 -> Http.status428
-  429 -> Http.status429
-  431 -> Http.status431
-  500 -> Http.status500
-  501 -> Http.status501
-  502 -> Http.status502
-  503 -> Http.status503
-  504 -> Http.status504
-  505 -> Http.status505
-  511 -> Http.status511
-  status -> Http.Status status ByteString.empty
+intToStatus status =
+  IntMap.findWithDefault (Http.Status status ByteString.empty) status intToStatusMap
+
+intToStatusMap :: IntMap Http.Status
+intToStatusMap =
+  IntMap.fromList
+    [ (100, Http.status100),
+      (101, Http.status101),
+      (200, Http.status200),
+      (201, Http.status201),
+      (202, Http.status202),
+      (203, Http.status203),
+      (204, Http.status204),
+      (205, Http.status205),
+      (206, Http.status206),
+      (300, Http.status300),
+      (301, Http.status301),
+      (302, Http.status302),
+      (303, Http.status303),
+      (304, Http.status304),
+      (305, Http.status305),
+      (307, Http.status307),
+      (308, Http.status308),
+      (400, Http.status400),
+      (401, Http.status401),
+      (402, Http.status402),
+      (403, Http.status403),
+      (404, Http.status404),
+      (405, Http.status405),
+      (406, Http.status406),
+      (407, Http.status407),
+      (408, Http.status408),
+      (409, Http.status409),
+      (410, Http.status410),
+      (411, Http.status411),
+      (412, Http.status412),
+      (413, Http.status413),
+      (414, Http.status414),
+      (415, Http.status415),
+      (416, Http.status416),
+      (417, Http.status417),
+      (418, Http.status418),
+      (422, Http.status422),
+      (426, Http.status426),
+      (428, Http.status428),
+      (429, Http.status429),
+      (431, Http.status431),
+      (500, Http.status500),
+      (501, Http.status501),
+      (502, Http.status502),
+      (503, Http.status503),
+      (504, Http.status504),
+      (505, Http.status505),
+      (511, Http.status511)
+    ]
