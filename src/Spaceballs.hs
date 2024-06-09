@@ -60,8 +60,10 @@ import Control.Applicative (Alternative (..))
 import Control.Exception (Exception (..), asyncExceptionFromException, asyncExceptionToException, throwIO, try)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Builder qualified as ByteString (Builder)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Coerce (coerce)
+import Data.Functor (void)
 import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Kind (Type)
@@ -79,6 +81,7 @@ import GHC.Generics (Generic)
 import Network.HTTP.Types qualified as Http
 import Network.HTTP.Types.Status qualified as Http
 import Network.Wai qualified as Wai
+import Network.Wai.Internal qualified as Wai (ResponseReceived (..))
 import Spaceballs.Headers
   ( Headers,
     HeadersBuilder,
@@ -104,15 +107,17 @@ import Prelude hiding (id)
 application :: Router a -> a -> Wai.Application
 application router_ env request0 respond_ = do
   request <- makeRequest request0
-  try (applyRouter router_ env request) >>= \case
-    Left exception
-      | Just (Respond response_) <- fromException @Respond exception -> respond_ response_
-      | otherwise -> throwIO exception
+  try (applyRouter router_ env request respond_) >>= \case
+    Left exception ->
+      case fromException exception of
+        Just (Respond response_) -> respond_ response_
+        Just Responded -> pure Wai.ResponseReceived
+        Nothing -> throwIO exception
     Right v -> absurd v
 
--- Internal exception type that indicates we have a response for the client.
-newtype Respond
-  = Respond Wai.Response
+data Respond
+  = Respond !Wai.Response
+  | Responded
 
 instance Exception Respond where
   fromException = asyncExceptionFromException
@@ -150,17 +155,17 @@ on405 handler router_ =
   router_ {routerOn405 = handler}
 
 -- | Route a request to a resource.
-applyRouter :: Router a -> a -> Request -> IO Void
-applyRouter router2 = \env request ->
+applyRouter :: Router a -> a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void
+applyRouter router_ = \env request respond_ ->
   case routePath request.path of
-    Nothing -> router2.routerOn404 env request
+    Nothing -> router_.routerOn404 env request
     Just resource ->
       case applyPathHandlers resource request.method of
-        Nothing -> router2.routerOn405 env request
-        Just handler -> handler env request
+        Nothing -> router_.routerOn405 env request
+        Just handler -> handler env request respond_
   where
     routePath =
-      applyHandler (concatHandlers router2.routerRoutes)
+      applyHandler (concatHandlers router_.routerRoutes)
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Handler
@@ -221,37 +226,60 @@ applyHandler router_ = \case
 -- | Handle a @DELETE@ request.
 delete :: (a -> Request -> IO Void) -> Handler a
 delete handler =
-  emptyHandler
-    { here = emptyPathHandlers {delete = Just handler}
-    }
+  emptyHandler {here = emptyPathHandlers {delete = simple handler}}
 
 -- | Handle a @GET@ request.
 get :: (a -> Request -> IO Void) -> Handler a
 get handler =
-  emptyHandler
-    { here = emptyPathHandlers {get = Just handler}
-    }
+  emptyHandler {here = emptyPathHandlers {get = simple handler}}
+
+-- | Handle a @GET@ request.
+get' :: (a -> Request -> (Response -> IO Void) -> IO Void) -> Handler a
+get' handler =
+  emptyHandler {here = emptyPathHandlers {get = complex handler}}
 
 -- | Handle a @PATCH@ request.
 patch :: (a -> Request -> IO Void) -> Handler a
 patch handler =
-  emptyHandler
-    { here = emptyPathHandlers {patch = Just handler}
-    }
+  emptyHandler {here = emptyPathHandlers {patch = simple handler}}
+
+-- | Handle a @PATCH@ request.
+patch' :: (a -> Request -> (Response -> IO Void) -> IO Void) -> Handler a
+patch' handler =
+  emptyHandler {here = emptyPathHandlers {patch = complex handler}}
 
 -- | Handle a @POST@ request.
 post :: (a -> Request -> IO Void) -> Handler a
 post handler =
-  emptyHandler
-    { here = emptyPathHandlers {post = Just handler}
-    }
+  emptyHandler {here = emptyPathHandlers {post = simple handler}}
+
+-- | Handle a @POST@ request.
+post' :: (a -> Request -> (Response -> IO Void) -> IO Void) -> Handler a
+post' handler =
+  emptyHandler {here = emptyPathHandlers {post = complex handler}}
 
 -- | Handle a @PUT@ request.
 put :: (a -> Request -> IO Void) -> Handler a
 put handler =
-  emptyHandler
-    { here = emptyPathHandlers {put = Just handler}
-    }
+  emptyHandler {here = emptyPathHandlers {put = simple handler}}
+
+-- | Handle a @PUT@ request.
+put' :: (a -> Request -> (Response -> IO Void) -> IO Void) -> Handler a
+put' handler =
+  emptyHandler {here = emptyPathHandlers {put = complex handler}}
+
+simple :: (a -> Request -> IO Void) -> Maybe (a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void)
+simple handler =
+  Just \env request _ -> handler env request
+
+complex ::
+  (a -> Request -> (Response -> IO Void) -> IO Void) ->
+  Maybe (a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void)
+complex handler =
+  Just \env request respond_ ->
+    handler env request \response_ -> do
+      void (respond_ (responseToWai response_))
+      throwIO Responded
 
 -- | Capture a path segment.
 capture :: (Text -> [Handler a]) -> Handler a
@@ -298,11 +326,11 @@ runMapping = \case
 
 -- A collection of resource handlers (one per HTTP verb that can be made upon the resource).
 data PathHandlers a = PathHandlers
-  { delete :: !(Maybe (a -> Request -> IO Void)),
-    get :: !(Maybe (a -> Request -> IO Void)),
-    patch :: !(Maybe (a -> Request -> IO Void)),
-    post :: !(Maybe (a -> Request -> IO Void)),
-    put :: !(Maybe (a -> Request -> IO Void))
+  { delete :: !(Maybe (a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void)),
+    get :: !(Maybe (a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void)),
+    patch :: !(Maybe (a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void)),
+    post :: !(Maybe (a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void)),
+    put :: !(Maybe (a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void))
   }
 
 -- Left-biased
@@ -314,7 +342,7 @@ emptyPathHandlers :: PathHandlers a
 emptyPathHandlers =
   PathHandlers Nothing Nothing Nothing Nothing Nothing
 
-applyPathHandlers :: PathHandlers a -> Http.Method -> Maybe (a -> Request -> IO Void)
+applyPathHandlers :: PathHandlers a -> Http.Method -> Maybe (a -> Request -> (Wai.Response -> IO Wai.ResponseReceived) -> IO Void)
 applyPathHandlers handlers method
   | method == Http.methodGet = handlers.get
   | method == Http.methodPost = handlers.post
@@ -475,6 +503,37 @@ setBody body response_ =
       status = response_.status
     }
 
+data StreamingResponse = StreamingResponse
+  { body :: (ByteString.Builder -> IO ()) -> IO () -> IO (),
+    headers :: !Headers,
+    status :: {-# UNPACK #-} !Int
+  }
+  deriving stock (Generic)
+
+response' :: Int -> StreamingResponse
+response' status =
+  StreamingResponse
+    { body = \_ _ -> pure (),
+      headers = emptyHeaders,
+      status
+    }
+
+setHeaders' :: Headers -> StreamingResponse -> StreamingResponse
+setHeaders' hdrs response_ =
+  StreamingResponse
+    { body = response_.body,
+      headers = hdrs,
+      status = response_.status
+    }
+
+setBody' :: ((ByteString.Builder -> IO ()) -> IO () -> IO ()) -> StreamingResponse -> StreamingResponse
+setBody' body response_ =
+  StreamingResponse
+    { body,
+      headers = response_.headers,
+      status = response_.status
+    }
+
 responseToWai :: Response -> Wai.Response
 responseToWai response_ =
   Wai.responseLBS
@@ -483,13 +542,9 @@ responseToWai response_ =
     (LazyByteString.fromStrict response_.body)
 
 -- | Respond to the client.
-respond :: Response -> IO void
+respond :: Response -> IO v
 respond =
-  respondWai . responseToWai
-
-respondWai :: Wai.Response -> IO void
-respondWai =
-  throwIO . Respond
+  throwIO . Respond . responseToWai
 
 intToStatus :: Int -> Http.Status
 intToStatus status =
